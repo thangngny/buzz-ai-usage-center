@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.ruff_cache/
+
+# Logs and runtime databases
+*.log
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Local temporary backups
+backups/
+.tempmediaStorage/
