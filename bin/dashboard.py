@@ -432,7 +432,7 @@ def provider_quota() -> dict:
     if not rows:
         return {}
     # Bo so doc cu hon 7 ngay: 11/09 co ban doc "30 ngay, dung 100%" tu 14/08
-    # lam o chinh bao nham congthangws04 het sach trong khi tai khoan van chay.
+    # lam o chinh bao nham mot tai khoan het sach trong khi tai khoan van chay.
     live = [r for r in rows
             if (r.get("resets_at") or 0) > now and now - (r.get("read_at") or 0) <= 7 * 86400]
     if live:

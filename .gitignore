@@ -25,3 +25,7 @@ db-backup-*/
 usage.db*
 *.sqlite
 *.sqlite3
+
+# Mapping email tai khoan AGY that - KHONG day len git
+agy-accounts.json
+capacity_poller.log

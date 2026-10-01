@@ -28,18 +28,38 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import analytics  # noqa: E402
 import ledger  # noqa: E402
 
-AGY_QUOTA = "/home/ncthang/.local/bin/agy-quota"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Fixed gateway account mapping (must mirror buzz-agent-gateway; emails never logged)
-EMAIL_TO_AGENT = {
-    "nghiemlong1k9@gmail.com": "agy-1",
-    "thangngny2004@gmail.com": "agy-2",
-    "anhghav@gmail.com": "agy-3",
-    "kaitokiss30@gmail.com": "agy-4",
-}
+AGY_QUOTA = os.environ.get("AGY_QUOTA_BIN", "/home/ncthang/.local/bin/agy-quota")
 
-POLL_FAILURE_LOG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "capacity_poller.log")
+# Fixed gateway account mapping (must mirror buzz-agent-gateway; emails never logged).
+# Real addresses live outside version control: set AGY_ACCOUNT_MAP to inline JSON,
+# or keep them in agy-accounts.json next to the repo root (git-ignored).
+# See agy-accounts.example.json for the expected shape.
+ACCOUNT_MAP_FILE = os.environ.get(
+    "AGY_ACCOUNT_MAP_FILE", os.path.join(REPO_ROOT, "agy-accounts.json"))
+
+
+def _load_email_to_agent() -> dict:
+    raw = os.environ.get("AGY_ACCOUNT_MAP")
+    if not raw:
+        try:
+            with open(ACCOUNT_MAP_FILE, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).lower(): str(v) for k, v in data.items() if k and v}
+
+
+EMAIL_TO_AGENT = _load_email_to_agent()
+
+POLL_FAILURE_LOG = os.path.join(REPO_ROOT, "capacity_poller.log")
 
 
 def plog(msg: str):
@@ -94,6 +114,10 @@ def main():
     interval = int(ledger.get_setting("capacity_poll_interval_seconds", "600"))
     once = "--once" in sys.argv
     plog(f"capacity poller start (interval={interval}s, once={once})")
+    if not EMAIL_TO_AGENT:
+        plog("no gateway account mapping configured "
+             f"(set AGY_ACCOUNT_MAP or create {ACCOUNT_MAP_FILE}); "
+             "every account will be skipped")
     while True:
         try:
             n = poll_once()
