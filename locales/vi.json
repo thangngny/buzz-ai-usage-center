@@ -83,11 +83,11 @@
     "view_all_users": "Xem tất cả người dùng",
     "agent_breakdown": "Mức sử dụng theo Agent",
     "agent_breakdown_desc": "Tỷ lệ phân bổ yêu cầu qua các Agent",
-    "capacity_title": "DUNG LƯỢNG TÀI KHOẢN AGY",
-    "capacity_microcopy": "Đây là dung lượng còn lại của từng tài khoản AGY, không phải hạn mức của người dùng.",
+    "capacity_title": "HẠN MỨC NHÀ CUNG CẤP",
+    "capacity_microcopy": "Hạn mức còn lại của từng nhà cung cấp (ChatGPT, Ollama Cloud) — khác với mức tiêu thụ của người dùng.",
     "recent_activity": "Hoạt động gần đây",
     "recent_activity_desc": "Nhật ký 15 yêu cầu AI mới nhất trong hệ thống",
-    "empty_activity": "Chưa có dữ liệu sử dụng. Dữ liệu sẽ xuất hiện sau khi người dùng bắt đầu gọi Claude hoặc AGY trên Buzz."
+    "empty_activity": "Chưa có dữ liệu sử dụng. Dữ liệu xuất hiện sau khi agent Buzz gọi model."
   },
   "users": {
     "title": "Người dùng",
@@ -131,7 +131,7 @@
   },
   "agents": {
     "title": "Agent AI",
-    "subtitle": "Theo dõi trạng thái và năng lực xử lý của 5 Agent trong hệ thống Buzz",
+    "subtitle": "Theo dõi trạng thái và model thật của từng agent Buzz",
     "status_active": "Đang hoạt động",
     "status_idle": "Sẵn sàng",
     "col_agent": "Tên Agent",
@@ -140,14 +140,14 @@
     "col_users": "Người dùng",
     "col_avg_time": "Thời gian phản hồi",
     "col_failures": "Số lần lỗi",
-    "col_capacity": "Dung lượng tài khoản AGY",
+    "col_capacity": "Hạn mức nhà cung cấp",
     "local_cli_note": "Chạy CLI cục bộ (Không giới hạn tài khoản)",
     "capacity_remaining": "Dung lượng còn lại",
     "lowest_model": "mô hình thấp nhất",
     "model_breakdown": "Chi tiết từng mô hình",
     "col_model": "Mô hình",
     "col_resets": "Làm mới lúc",
-    "distinction_note": "Lưu ý quan trọng: Tỷ lệ sử dụng của người dùng (%) và Dung lượng tài khoản AGY (%) là hai chỉ số hoàn toàn khác nhau và không bao giờ được gộp chung."
+    "distinction_note": "Lưu ý: Tỷ lệ tiêu thụ của người dùng (%) và Hạn mức nhà cung cấp (%) là hai chỉ số khác nhau, không gộp chung."
   },
   "calibration": {
     "title": "Phân tích hạn mức",
@@ -255,7 +255,7 @@
     "reset_time_label": "Thời điểm làm mới hạn mức",
     "reset_time_val": "00:00 hàng ngày (Giờ Việt Nam - ICT)",
     "freshness_label": "Thời gian hiệu lực định danh",
-    "poll_interval_label": "Chu kỳ quét dung lượng AGY",
+    "poll_interval_label": "Chu kỳ quét hạn mức nhà cung cấp",
     "section_access": "Quyền quản trị & Truy cập",
     "owner_pubkeys_label": "Khóa công khai của Chủ sở hữu (Owner pubkeys)",
     "debug_section": "Chi tiết kỹ thuật & Biến môi trường (Dành cho nhà phát triển)",

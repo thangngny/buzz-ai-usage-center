@@ -64,7 +64,10 @@ DEFAULT_SETTINGS = {
     "usage_command": "/usage",
     # Owner pubkeys (comma-separated) authorized for owner-only zero-AI
     # overviews (/usage system). Identity is pubkey-based, never display-name.
-    "owner_pubkeys": "2da3184b999140883867865a09b97d61397a5265e209fe9c58b93c59f3f0001e",
+    # Chu so huu: lay tu bien moi truong BUZZ_OWNER_PUBKEY, khong hardcode.
+    # Ban goc ghi cung pubkey cua tac gia (2da3184b... = NcThang), lam dashboard
+    # coi anh ay la chu tren MOI may cai dat — sai voi bat ky ai khac.
+    "owner_pubkeys": os.environ.get("BUZZ_OWNER_PUBKEY", ""),
 }
 
 _SCHEMA = """
@@ -362,13 +365,24 @@ def upsert_agent(agent_id: str, display_name: str, backend_kind: str,
         conn.close()
 
 
-CANONICAL_AGENTS = [
-    ("claude-cli", "Claude CLI", "claude-cli"),
-    ("agy-1", "AGY 1", "agy"),
-    ("agy-2", "AGY 2", "agy"),
-    ("agy-3", "AGY 3", "agy"),
-    ("agy-4", "AGY 4", "agy"),
-]
+# Ban goc gieo san 5 agent cua he tac gia (Claude CLI + 4 cong Google AGY).
+# He nay khong dung nguon nao trong so do — agent that duoc bin/buzz_collector.py
+# dang ky tu managed-agents.json cua Buzz. De nguyen danh sach cu thi moi lan
+# dashboard khoi dong lai no lai chen 5 dong ma khong ai dung vao bang agents.
+CANONICAL_AGENTS = []
+
+
+def list_agents() -> list:
+    """Danh sach agent kem ten hien thi. Dashboard dung de doi agent_id -> ten
+    that, thay vi hien 16 ky tu dau cua pubkey."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT agent_id, display_name, backend_kind, agent_pubkey FROM agents"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def ensure_canonical_agents() -> None:
@@ -834,6 +848,27 @@ def record_capacity_snapshots(agent_id: str, rows: list, source: str = "agm/agy-
         conn.close()
 
 
+def latest_capacity_all() -> list:
+    """Snapshot han muc moi nhat cua TUNG nha cung cap.
+
+    Ban goc chi co latest_capacity(agent_id) — phai biet truoc ten. Trang tong
+    quan can biet "nha cung cap nao sap het nhat" ma khong biet truoc co nhung
+    nguon nao, nen can ban nay.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT s.agent_id, s.model, s.remaining_percent, s.reset_at, s.captured_at"
+            " FROM account_capacity_snapshots s"
+            " JOIN (SELECT agent_id, MAX(captured_at) mx"
+            "       FROM account_capacity_snapshots GROUP BY agent_id) t"
+            "   ON t.agent_id = s.agent_id AND t.mx = s.captured_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def latest_capacity(agent_id: str) -> list:
     conn = connect()
     try:
@@ -967,6 +1002,206 @@ def user_detail(community_id: str, pubkey: str) -> dict:
         conn.close()
     return {"window_start": ws, "evaluate": ev, "by_agent": by_agent,
             "recent": recent, "alerts": alerts, "runtime_ms_today": runtime}
+
+
+# ChatGPT Codex chinh hang — khong gom Hermes / Ollama / Claude.
+CHATGPT_CODEX_KINDS = (
+    "codex-openai", "codex-sales", "codex-creative",
+    "codex-creative-lead", "codex-pm", "codex-pm-lead",
+)
+
+
+def chatgpt_kind_to_email() -> dict:
+    """runtime harness -> email ChatGPT (tu bang han muc)."""
+    conn = connect()
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT account_id, harnesses FROM codex_account_limits"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        email = (r["account_id"] or "").strip()
+        for h in (r["harnesses"] or "").split(","):
+            h = h.strip()
+            if h and email:
+                out[h] = email
+    return out
+
+
+def codex_people_breakdown(pubkey: Optional[str] = None) -> dict:
+    """Ai dung Codex ChatGPT nhu the nao. Bo Hermes/Ollama.
+
+    kind: person | agent | unknown
+    """
+    kinds = CHATGPT_CODEX_KINDS
+    kind_email = chatgpt_kind_to_email()
+    ws = window_start()
+    conn = connect()
+    try:
+        agent_pk = {
+            (r["agent_pubkey"] or "").lower()
+            for r in conn.execute(
+                "SELECT agent_pubkey FROM agents WHERE agent_pubkey IS NOT NULL"
+            )
+        }
+        ph = ",".join("?" * len(kinds))
+        extra = ""
+        args: list = list(kinds)
+        if pubkey:
+            extra = " AND r.principal_pubkey = ?"
+            args.append(pubkey)
+        rows = conn.execute(
+            "SELECT r.principal_pubkey AS pk, p.display_name AS pname,"
+            " p.community_id AS pcomm,"
+            " a.backend_kind AS kind, a.display_name AS aname, a.agent_id AS aid,"
+            " COUNT(*) AS n, COALESCE(SUM(r.normalized_units),0) AS tok,"
+            " SUM(CASE WHEN r.started_at >= ? THEN 1 ELSE 0 END) AS n_today,"
+            " COALESCE(SUM(CASE WHEN r.started_at >= ? THEN r.normalized_units ELSE 0 END),0) AS tok_today,"
+            " MAX(r.started_at) AS last_ts "
+            "FROM requests r "
+            "JOIN agents a ON a.agent_id = r.agent_id "
+            "LEFT JOIN principals p ON p.principal_pubkey = r.principal_pubkey "
+            "WHERE a.backend_kind IN (" + ph + ")" + extra + " "
+            "GROUP BY r.principal_pubkey, p.display_name, p.community_id,"
+            " a.backend_kind, a.display_name, a.agent_id",
+            [ws, ws] + args,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    people = {}
+    emails = []
+    seen_email = set()
+
+    def bucket_key(pk, pname):
+        pk = (pk or "").strip()
+        if not pk:
+            return "unknown", "Chưa rõ người", "unknown", ""
+        if pk.lower() in agent_pk:
+            return "agent-loop", "Agent gọi nhau", "agent", pk
+        return pk, (pname or "").strip() or (pk[:10] + "…"), "person", pk
+
+    for r in rows:
+        key, name, bkind, pk = bucket_key(r["pk"], r["pname"])
+        rec = people.setdefault(key, {
+            "key": key, "name": name, "kind": bkind, "pubkey": pk,
+            "community": r["pcomm"] or "",
+            "pubkeys": [pk] if pk else [],
+            "requests": 0, "tokens": 0.0, "n_today": 0, "tok_today": 0.0,
+            "last_ts": 0,
+            "by_email": {}, "by_kind": {}, "agents": {},
+        })
+        rec["requests"] += int(r["n"] or 0)
+        rec["tokens"] += float(r["tok"] or 0)
+        rec["n_today"] += int(r["n_today"] or 0)
+        rec["tok_today"] += float(r["tok_today"] or 0)
+        rec["last_ts"] = max(int(rec.get("last_ts") or 0), int(r["last_ts"] or 0))
+        hk = r["kind"]
+        rec["by_kind"][hk] = rec["by_kind"].get(hk, {"n": 0, "tok": 0.0})
+        rec["by_kind"][hk]["n"] += int(r["n"] or 0)
+        rec["by_kind"][hk]["tok"] += float(r["tok"] or 0)
+        email = kind_email.get(hk) or hk
+        if email not in seen_email:
+            emails.append(email)
+            seen_email.add(email)
+        rec["by_email"][email] = rec["by_email"].get(email, {"n": 0, "tok": 0.0})
+        rec["by_email"][email]["n"] += int(r["n"] or 0)
+        rec["by_email"][email]["tok"] += float(r["tok"] or 0)
+        aid = r["aid"]
+        ag = rec["agents"].setdefault(aid, {
+            "agent_id": aid, "name": r["aname"] or aid, "kind": hk,
+            "email": email, "n": 0, "tok": 0.0,
+        })
+        ag["n"] += int(r["n"] or 0)
+        ag["tok"] += float(r["tok"] or 0)
+
+    # Cot acc: sales/creative/pm/openai theo thu tu quen thuoc, roi email le.
+    prefer = []
+    for kind in ("codex-sales", "codex-creative", "codex-pm", "codex-openai"):
+        em = kind_email.get(kind)
+        if em and em not in prefer:
+            prefer.append(em)
+    for em in emails:
+        if em not in prefer:
+            prefer.append(em)
+
+    # Gop cung ten + community (vd Manh doi khoa pubkey) de khong hien 2 dong.
+    merged = {}
+    for p in people.values():
+        if p["kind"] == "person":
+            mk = ("person", (p["name"] or "").strip().lower(),
+                  (p.get("community") or "").strip().lower())
+        else:
+            mk = (p["kind"], p["key"])
+        if mk not in merged:
+            merged[mk] = p
+            continue
+        dst = merged[mk]
+        dst["requests"] += p["requests"]
+        dst["tokens"] += p["tokens"]
+        dst["n_today"] += p["n_today"]
+        dst["tok_today"] += p["tok_today"]
+        dst["last_ts"] = max(int(dst.get("last_ts") or 0), int(p.get("last_ts") or 0))
+        for pk in (p.get("pubkeys") or ([p.get("pubkey")] if p.get("pubkey") else [])):
+            if pk and pk not in dst["pubkeys"]:
+                dst["pubkeys"].append(pk)
+        if int(p.get("last_ts") or 0) >= int(dst.get("last_ts") or 0) and p.get("pubkey"):
+            dst["pubkey"] = p["pubkey"]
+        for em, cell in (p.get("by_email") or {}).items():
+            dcell = dst["by_email"].setdefault(em, {"n": 0, "tok": 0.0})
+            dcell["n"] += cell["n"]
+            dcell["tok"] += cell["tok"]
+        for hk, cell in (p.get("by_kind") or {}).items():
+            dcell = dst["by_kind"].setdefault(hk, {"n": 0, "tok": 0.0})
+            dcell["n"] += cell["n"]
+            dcell["tok"] += cell["tok"]
+        for aid, ag in (p.get("agents") or {}).items():
+            dag = dst["agents"].setdefault(aid, dict(ag, n=0, tok=0.0))
+            dag["n"] += ag["n"]
+            dag["tok"] += ag["tok"]
+
+    ordered = sorted(merged.values(), key=lambda p: (-p["tokens"], -p["requests"]))
+    for p in ordered:
+        p["top_agents"] = sorted(p["agents"].values(), key=lambda a: -a["tok"])[:8]
+        nkey = len(p.get("pubkeys") or [])
+        if p["kind"] == "person" and nkey > 1:
+            p["name_note"] = "%d khóa pubkey (đã gộp)" % nkey
+    n_person = sum(1 for p in ordered if p["kind"] == "person")
+    return {
+        "accounts": prefer,
+        "kind_email": kind_email,
+        "people": ordered,
+        "total_requests": sum(p["requests"] for p in ordered),
+        "total_tokens": sum(p["tokens"] for p in ordered),
+        "n_today": sum(p["n_today"] for p in ordered),
+        "tok_today": sum(p["tok_today"] for p in ordered),
+        "n_person": n_person,
+    }
+
+
+def codex_agent_totals() -> list:
+    """Tong Codex ChatGPT toan thoi gian theo agent. Khong loc theo ngay."""
+    kinds = CHATGPT_CODEX_KINDS
+    ph = ",".join("?" * len(kinds))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT a.agent_id, a.display_name, a.backend_kind,"
+            " COUNT(*) AS requests, COALESCE(SUM(r.normalized_units),0) AS units "
+            "FROM requests r JOIN agents a ON a.agent_id = r.agent_id "
+            "WHERE a.backend_kind IN (" + ph + ") "
+            "GROUP BY a.agent_id, a.display_name, a.backend_kind "
+            "ORDER BY units DESC",
+            kinds,
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def agent_summaries() -> list:

@@ -9,13 +9,18 @@ Completely localized in Vietnamese with premium, data-focused UI/UX.
 - Contains no secrets: no private keys, no tokens, no account emails, no prompt text.
 """
 
+import datetime as dt
 import html
 import json
 import os
+import socket
+import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
 
@@ -26,18 +31,295 @@ import ui_components as ui  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8787
+ICT = ZoneInfo("Asia/Ho_Chi_Minh")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def _funnel_url() -> str:
+    """8443 = dashboard. Khong dung 443 (dim0/fairies va site trungthu)."""
+    env = (os.environ.get("BUZZ_FUNNEL_URL") or "").strip()
+    if env:
+        return env.rstrip("/")
+    try:
+        r = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=8,
+        )
+        name = ((json.loads(r.stdout or "{}").get("Self") or {}).get("DNSName") or "").strip().rstrip(".")
+        if name:
+            return "https://%s:8443" % name
+    except Exception:
+        pass
+    return "https://trungthu.tailc0eb7b.ts.net:8443"
 
-AGENT_LABELS = {
-    "claude-cli": "Claude CLI",
-    "agy-1": "AGY 1",
-    "agy-2": "AGY 2",
-    "agy-3": "AGY 3",
-    "agy-4": "AGY 4",
+
+FUNNEL_URL = _funnel_url()
+LOCAL_URL = "http://127.0.0.1:8787"
+
+PROVIDER_NAMES = {
+    "codex-openai": "ChatGPT",
+    "codex-sales": "ChatGPT · sales",
+    "codex-creative": "ChatGPT · creative",
+    "codex-creative-lead": "ChatGPT · creative-lead",
+    "codex-pm": "ChatGPT · PM/MARCOM",
+    "codex-pm-lead": "ChatGPT · PM lead",
+    "codex-ollama": "Ollama Cloud",
+    "codex-t2": "Ollama Cloud T2",
+    "claude-ollama": "Claude · Ollama",
+    "hermes-pm": "Hermes PM",
+    "hermes-t2": "Hermes T2",
+    "hermes-ketoan": "Hermes kế toán",
+    "hermes-creative": "Hermes creative",
+    "hermes-hr": "Hermes HR",
+    "hermes-ba": "Hermes BA",
+    "hermes-dev": "Hermes Dev",
 }
+
+_MODEL_CACHE = {"at": 0.0, "by_backend": {}, "by_agent": {}}
+REFRESH = {"last": 0.0, "ok": True, "msg": "", "running": False}
+COLLECT = {"last": 0.0, "ok": True, "msg": "", "running": False, "n_req": None}
+JOB = threading.Lock()
+QUOTA_EVERY = 300
+COLLECT_EVERY = 600
+QUOTA_TIMEOUT = 300
+# > buzz_collector.WSL_TIMEOUT (480) + 2 lan cho khoa SQLite 60 s: dashboard giet
+# collector truoc thi `finally` cua no khong chay (file tam + tien trinh WSL mo coi).
+COLLECT_TIMEOUT = 780
+
+
+def _child_run(args, timeout):
+    """Chay quota/collector: con ghi UTF-8, cha doc UTF-8. Dashboard do watchdog
+    bat khong co PYTHONIOENCODING -> mac dinh cp1252, ten tieng Viet lam vo pipe."""
+    return subprocess.run(
+        args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=timeout, cwd=ROOT, env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+    )
+
+
+def live_models() -> dict:
+    now = time.time()
+    if now - _MODEL_CACHE["at"] < 30:
+        return _MODEL_CACHE
+    conn = ledger.connect()
+    try:
+        rows = conn.execute(
+            "SELECT a.backend_kind, r.agent_id, r.model, MAX(r.started_at) AS ts "
+            "FROM requests r JOIN agents a ON a.agent_id = r.agent_id "
+            "WHERE r.model IS NOT NULL AND r.model != '' "
+            "GROUP BY a.backend_kind, r.agent_id, r.model"
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    best_b, best_a = {}, {}
+    for r in rows:
+        kind, aid, model, ts = r[0], r[1], r[2], r[3] or 0
+        if ts >= best_b.get(kind, (0, ""))[0]:
+            best_b[kind] = (ts, model)
+        if ts >= best_a.get(aid, (0, ""))[0]:
+            best_a[aid] = (ts, model)
+    _MODEL_CACHE.update(
+        at=now,
+        by_backend={k: v[1] for k, v in best_b.items()},
+        by_agent={k: v[1] for k, v in best_a.items()},
+    )
+    return _MODEL_CACHE
+
+
+def backend_label(kind: str) -> str:
+    """Nha cung cap + model THAT (luot moi nhat), khong ghi cung gpt-oss."""
+    name = PROVIDER_NAMES.get(kind) or kind or "?"
+    model = live_models()["by_backend"].get(kind)
+    return ("%s · %s" % (name, model)) if model else name
+
+
+def owner_display_name() -> str:
+    pk = (ledger.get_setting("owner_pubkeys") or "").split(",")[0].strip()
+    if not pk:
+        return "Chủ sở hữu"
+    conn = ledger.connect()
+    try:
+        row = conn.execute(
+            "SELECT display_name FROM principals WHERE principal_pubkey=?", (pk,)
+        ).fetchone()
+    except Exception:
+        row = None
+    finally:
+        conn.close()
+    if row and row["display_name"]:
+        return row["display_name"]
+    return pk[:8]
+
+
+def _tail_text(r) -> str:
+    return ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[-600:]
+
+
+def _parse_collect_n(text: str):
+    for line in (text or "").splitlines():
+        if "requests moi" in line.lower() or "requests mới" in line.lower():
+            for part in reversed(line.replace(",", "").split()):
+                if part.isdigit():
+                    return int(part)
+    return None
+
+
+def refresh_quota(reason: str = "timer") -> None:
+    if REFRESH["running"]:
+        return
+    REFRESH["running"] = True
+    try:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "buzz_quota.py")
+        with JOB:
+            r = _child_run([sys.executable, script], QUOTA_TIMEOUT)
+        REFRESH["ok"] = r.returncode == 0
+        REFRESH["msg"] = _tail_text(r)
+        REFRESH["last"] = time.time()
+        REFRESH["reason"] = reason
+    except Exception as e:
+        REFRESH["ok"] = False
+        REFRESH["msg"] = str(e)
+        REFRESH["last"] = time.time()
+    finally:
+        REFRESH["running"] = False
+
+
+def refresh_collect(reason: str = "timer") -> None:
+    """Quet lai moi harness + file phien. --no-backup de poller khong ngap o .bak."""
+    if COLLECT["running"]:
+        return
+    COLLECT["running"] = True
+    try:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "buzz_collector.py")
+        with JOB:
+            r = _child_run([sys.executable, script, "--no-backup"], COLLECT_TIMEOUT)
+        full = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
+        COLLECT["ok"] = r.returncode == 0
+        COLLECT["msg"] = full[-600:]
+        n_req = _parse_collect_n(full)
+        if n_req is None:
+            try:
+                conn = ledger.connect()
+                try:
+                    n_req = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+                finally:
+                    conn.close()
+            except Exception:
+                n_req = None
+        COLLECT["n_req"] = n_req
+        COLLECT["last"] = time.time()
+        COLLECT["reason"] = reason
+        _MODEL_CACHE["at"] = 0.0
+        _AGENT_LABEL_CACHE["at"] = 0.0
+        _COMM_CACHE["at"] = 0.0
+    except Exception as e:
+        COLLECT["ok"] = False
+        COLLECT["msg"] = str(e)
+        COLLECT["last"] = time.time()
+    finally:
+        COLLECT["running"] = False
+
+
+def quota_poller() -> None:
+    time.sleep(4)
+    refresh_quota("startup")
+    while True:
+        time.sleep(QUOTA_EVERY)
+        refresh_quota("timer")
+
+
+def collect_poller() -> None:
+    time.sleep(20)
+    refresh_collect("startup")
+    while True:
+        time.sleep(COLLECT_EVERY)
+        refresh_collect("timer")
+
+
+_AGENT_LABEL_CACHE = {"at": 0.0, "map": {}}
 
 
 def agent_label(a: str) -> str:
-    return AGENT_LABELS.get(a, a)
+    """Ten hien thi cua agent, lay tu bang `agents`. Cache 30s de moi lan ve
+    trang khong phai truy van lai cho tung dong."""
+    import time
+    now = time.time()
+    if now - _AGENT_LABEL_CACHE["at"] > 30:
+        try:
+            m = {}
+            for row in ledger.list_agents():
+                nm = (row.get("display_name") or "").strip()
+                if nm:
+                    m[row["agent_id"]] = nm
+            _AGENT_LABEL_CACHE["map"] = m
+            _AGENT_LABEL_CACHE["at"] = now
+        except Exception:
+            pass
+    return _AGENT_LABEL_CACHE["map"].get(a, a)
+
+
+def community_short(cid: str) -> str:
+    if not cid:
+        return ""
+    s = str(cid).replace("wss://", "").replace("https://", "")
+    return s.replace(".communities.buzz.xyz", "")
+
+
+_COMM_CACHE = {"at": 0.0, "map": {}}
+
+
+def agent_home_community() -> dict:
+    now = time.time()
+    if now - _COMM_CACHE["at"] < 30:
+        return _COMM_CACHE["map"]
+    conn = ledger.connect()
+    try:
+        rows = conn.execute(
+            "SELECT agent_id, community_id, COUNT(*) AS n FROM requests "
+            "WHERE community_id IS NOT NULL AND community_id != '' "
+            "GROUP BY 1,2 ORDER BY n DESC"
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    m = {}
+    for r in rows:
+        if r["agent_id"] not in m:
+            m[r["agent_id"]] = r["community_id"]
+    _COMM_CACHE.update(at=now, map=m)
+    return m
+
+
+def name_counts(items, key="display_name") -> dict:
+    out = {}
+    for x in items:
+        nm = (x.get(key) or "").strip() or "?"
+        out[nm] = out.get(nm, 0) + 1
+    return out
+
+
+def agent_pretty(a, counts) -> str:
+    nm = (a.get("display_name") or agent_label(a["agent_id"])).strip()
+    comm = community_short(agent_home_community().get(a["agent_id"]) or "")
+    if counts.get(nm, 0) > 1:
+        if comm:
+            return "%s · %s" % (nm, comm)
+        return "%s · %s" % (nm, (a.get("agent_id") or "")[:8])
+    if (a.get("backend_kind") or "-") in ("-",):
+        return "%s · builtin" % nm
+    return nm
+
+
+def person_pretty(u, counts) -> str:
+    nm = (u.get("display_name") or "").strip() or ((u.get("principal_pubkey") or "")[:10] + "…")
+    comm = community_short(u.get("community_id") or "")
+    if counts.get(nm, 0) > 1:
+        # Trung ten + cung community (Manh doi khoa) -> cat pubkey, khong gan nham 1 nguoi.
+        pk8 = (u.get("principal_pubkey") or "")[:8]
+        if comm:
+            return "%s · %s · %s" % (nm, comm, pk8)
+        return "%s · %s" % (nm, pk8)
+    return nm
 
 
 def get_unread_alerts_count() -> int:
@@ -99,51 +381,479 @@ def capacity_block(agent: dict) -> str:
 # PAGE 1: TỔNG QUAN (Overview)
 # ===========================================================================
 
+def codex_account_rows() -> list:
+    """Chi tiet TUNG tai khoan Codex chinh hang, doc tu bang codex_account_limits
+    (bin/buzz_quota.py ghi). User dang nhap nhieu tai khoan ChatGPT; han muc la
+    rieng tung tai khoan nen phai hien rieng, khong gop."""
+    try:
+        conn = ledger.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM codex_account_limits ORDER BY account_id, window_minutes"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def _fmt_ts(ts) -> str:
+    import datetime as _d
+    try:
+        return _d.datetime.fromtimestamp(int(ts)).strftime("%d/%m %H:%M") if ts else "-"
+    except Exception:
+        return "-"
+
+
+def _window_name(minutes) -> str:
+    try:
+        m = int(minutes or 0)
+    except Exception:
+        return "?"
+    if m >= 1440:
+        return "%d ngày" % (m // 1440)
+    if m >= 60:
+        return "%d giờ" % (m // 60)
+    return "%d phút" % m if m else "-"
+
+
+def provider_quota() -> dict:
+    """Chon tai khoan Codex chinh hang DANG NGUY HIEM NHAT cho o chinh.
+
+    Uu tien cua so con hieu luc (resets_at con o tuong lai), lay cai con it nhat.
+    Neu moi cua so da qua moc reset thi so lieu khong con dung — lay ban doc gan
+    nhat va ghi ro trong nhan de o chinh canh bao, khong trinh bay nhu hien tai.
+    """
+    import time as _t
+    import datetime as _d
+    now = _t.time()
+    rows = [r for r in codex_account_rows() if r.get("used_percent") is not None]
+    if not rows:
+        return {}
+    # Bo so doc cu hon 7 ngay: 11/09 co ban doc "30 ngay, dung 100%" tu 14/08
+    # lam o chinh bao nham congthangws04 het sach trong khi tai khoan van chay.
+    live = [r for r in rows
+            if (r.get("resets_at") or 0) > now and now - (r.get("read_at") or 0) <= 7 * 86400]
+    if live:
+        r = min(live, key=lambda x: 100.0 - float(x["used_percent"]))
+        expired = False
+    else:
+        r = max(rows, key=lambda x: x.get("read_at") or 0)
+        expired = True
+    reset_iso = ""
+    try:
+        reset_iso = _d.datetime.fromtimestamp(int(r["resets_at"]), _d.timezone.utc).isoformat()
+    except Exception:
+        pass
+    label = "tài khoản %s · cửa sổ %s · %d agent" % (
+        r.get("account_id"), _window_name(r.get("window_minutes")), int(r.get("agent_count") or 0))
+    if expired:
+        label += " · ĐÃ QUA MỐC RESET, số liệu không còn đúng"
+    return {
+        "agent_id": r.get("account_id"),
+        "label": label,
+        "remaining_percent": max(0.0, 100.0 - float(r["used_percent"])),
+        "reset_at": reset_iso,
+        "captured_at": r.get("read_at"),
+    }
+
+
+def codex_accounts_section() -> str:
+    """Bang chi tiet tung tai khoan Codex chinh hang x tung cua so han muc."""
+    import time as _t
+    import html as _h
+    now = _t.time()
+    rows = codex_account_rows()
+    if not rows:
+        return ('<div class="card-section"><div class="section-title">Tài khoản Codex chính hãng</div>'
+                '<div class="text-muted" style="margin-top:8px;">Chưa có dữ liệu — chạy bin/buzz_quota.py</div></div>')
+    trs = []
+    for r in rows:
+        used = r.get("used_percent")
+        used_t = "-" if used is None else "%.0f%%" % float(used)
+        rem_t = "-" if used is None else "%.0f%%" % (100.0 - float(used))
+        rs = r.get("resets_at") or 0
+        age_h = (now - (r.get("read_at") or now)) / 3600.0
+        if used is None:
+            st, color = "Không có số liệu", "var(--text-muted)"
+        elif rs and rs < now:
+            st, color = "Đã qua mốc reset", "#d97706"
+        elif age_h > 24 * 7:
+            st, color = "Số quá cũ %.0f ngày — chỉ tham khảo" % (age_h / 24.0), "var(--text-muted)"
+        elif age_h > 6:
+            st, color = "Số cũ %.0f giờ" % age_h, "#d97706"
+        else:
+            st, color = "Còn hiệu lực", "#16a34a"
+        acc = _h.escape(str(r.get("account_id") or "-"))
+        # Mot tai khoan (email) co the dung o nhieu noi: WSL qua harness Buzz va
+        # Windows qua app Codex. Hien tat ca noi dung + harness duoi ten tai khoan.
+        home = _h.escape(str(r.get("homes") or r.get("codex_home") or ""))
+        if r.get("window_minutes") and r.get("source_home"):
+            home = home + " · số đọc từ " + _h.escape(str(r.get("source_home")))
+        agents = _h.escape(str(r.get("agents") or ""), quote=True)
+        plan = _h.escape(str(r.get("plan") or "-"))
+        trs.append(
+            "<tr>"
+            f"<td><b>{acc}</b><div class='text-muted' style='font-size:11px;'>{home}</div></td>"
+            f"<td>{plan}</td>"
+            f"<td>{_window_name(r.get('window_minutes'))}</td>"
+            f"<td>{used_t}</td>"
+            f"<td><b>{rem_t}</b></td>"
+            f"<td>{_fmt_ts(rs)}</td>"
+            f"<td>{_fmt_ts(r.get('read_at'))}</td>"
+            f"<td style='color:{color};font-weight:600;'>{st}</td>"
+            f"<td title='{agents}'>{int(r.get('agent_count') or 0)}"
+            f"<div class='text-muted' style='font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>{agents}</div></td>"
+            "</tr>")
+    return (
+        '<div class="card-section">'
+        '<div class="section-header"><div>'
+        '<div class="section-title">Tài khoản Codex chính hãng</div>'
+        '<div class="section-subtitle">Gộp theo email — một tài khoản dùng ở nhiều nơi (WSL, app Windows) chỉ hiện một lần · bỏ qua Codex chạy qua Ollama</div>'
+        '</div></div>'
+        '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">'
+        '<thead><tr style="text-align:left;color:var(--text-muted);">'
+        '<th>Tài khoản</th><th>Gói</th><th>Cửa sổ</th><th>Đã dùng</th><th>Còn lại</th>'
+        '<th>Reset lúc</th><th>Số liệu lúc</th><th>Trạng thái</th><th>Agent</th></tr></thead>'
+        '<tbody>' + "".join(trs) + '</tbody></table></div></div>')
+
+
+def _win_status(r: dict, now: float) -> tuple:
+    used = r.get("used_percent")
+    rs = r.get("resets_at") or 0
+    age_h = (now - (r.get("read_at") or now)) / 3600.0
+    src = str(r.get("source_home") or "")
+    live = "live API" in src or (r.get("source") == "live-api")
+    if used is None:
+        return "Không có số", "var(--text-muted)", "#64748b"
+    if live and age_h <= 2:
+        return "Live API", "#16a34a", "#16a34a"
+    if rs and rs < now:
+        return "Đã qua mốc reset", "#d97706", "#d97706"
+    if age_h > 24 * 7:
+        return "Số quá cũ — tham khảo", "var(--text-muted)", "#64748b"
+    if age_h > 6:
+        return "Số cũ %.0f giờ" % age_h, "#d97706", "#d97706"
+    return "Còn hiệu lực", "#16a34a", "#16a34a"
+
+
+def account_cards_html() -> str:
+    now = time.time()
+    rows = [r for r in codex_account_rows()]
+    by = {}
+    for r in rows:
+        by.setdefault(r.get("account_id") or "?", []).append(r)
+    people_bd = ledger.codex_people_breakdown()
+    codex_who = {}
+    for p in (people_bd.get("people") or []):
+        label = p["name"]
+        if p["kind"] == "agent":
+            label = "Agent gọi nhau"
+        elif p["kind"] == "unknown":
+            label = "Chưa rõ người"
+        for em, cell in (p.get("by_email") or {}).items():
+            if not cell.get("n"):
+                continue
+            codex_who.setdefault(em, []).append(
+                {"name": label, "kind": p["kind"], "n": cell["n"], "tok": cell["tok"]}
+            )
+    for em in codex_who:
+        codex_who[em].sort(key=lambda x: -x["tok"])
+    if not by:
+        return ('<div class="card-section"><div class="section-title">Tài khoản Codex</div>'
+                '<div class="text-muted" style="margin-top:8px;">Chưa có số hạn mức — chờ bộ đọc chạy.</div></div>')
+    cards = []
+    for email in sorted(by):
+        rs = by[email]
+        head = rs[0]
+        wins = [r for r in rs if r.get("used_percent") is not None]
+        statuses = [_win_status(r, now) for r in wins] or [("Chưa có cửa sổ", "var(--text-muted)", "#64748b")]
+        bar = statuses[0][2]
+        if any(s[0] == "Còn hiệu lực" for s in statuses):
+            live = [s for s in statuses if s[0] == "Còn hiệu lực"]
+            bar = live[0][2]
+        win_html = []
+        for r in sorted(wins, key=lambda x: int(x.get("window_minutes") or 0)):
+            used = float(r["used_percent"])
+            rem = 100.0 - used
+            st, color, _ = _win_status(r, now)
+            win_html.append(
+                f"<div class='acct-win'>"
+                f"<div class='acct-win-row'><span>{html.escape(_window_name(r.get('window_minutes')))}</span>"
+                f"<b>{used:.0f}% đã dùng · còn {rem:.0f}%</b></div>"
+                f"{ui.render_progress_bar(used, rem, height=7, show_label=False)}"
+                f"<div class='acct-meta' style='margin-top:6px;color:{color};'>{st}"
+                f" · đọc {_fmt_ts(r.get('read_at'))} · reset {_fmt_ts(r.get('resets_at'))}</div>"
+                f"</div>"
+            )
+        if not win_html:
+            win_html.append("<div class='acct-meta' style='margin-top:10px;'>Chưa có phiên trả rate_limits</div>")
+        has_live = any("live API" in str(r.get("source_home") or "") for r in wins)
+        if wins and not has_live and all(s[0] != "Còn hiệu lực" and s[0] != "Live API" for s in statuses):
+            win_html.append(
+                "<div class='acct-meta' style='margin-top:8px;color:#d97706;'>"
+                "Cần đăng nhập lại Codex (chatgpt.com) để lấy hạn mức live</div>"
+            )
+        n_ag = int(head.get("agent_count") or 0)
+        agents = html.escape(str(head.get("agents") or ""), quote=True)
+        homes = html.escape(str(head.get("homes") or ""))
+        who_html = ""
+        who_rows = []
+        for p in (codex_who.get(email) or []):
+            who_rows.append(
+                "<div class='acct-meta' style='display:flex;justify-content:space-between;gap:8px;'>"
+                "<span>%s</span><span><b>%s</b> · %s tok</span></div>"
+                % (html.escape(p["name"]), i18n.fmt_number(p["n"]), i18n.fmt_number(p["tok"]))
+            )
+        if who_rows:
+            who_html = ("<div style='margin-top:10px;padding-top:8px;border-top:1px solid var(--border-subtle);'>"
+                        "<div class='acct-meta' style='margin-bottom:4px;'>Ai đốt acc này (toàn thời gian)</div>"
+                        + "".join(who_rows[:6]) + "</div>")
+        cards.append(
+            f"<div class='acct-card' style='--acct-bar:{bar};'>"
+            f"<div style='display:flex;justify-content:space-between;gap:8px;align-items:flex-start;'>"
+            f"<div><div class='acct-mail'>{html.escape(str(email))}</div>"
+            f"<div class='acct-meta'>gói {html.escape(str(head.get('plan') or '-'))}"
+            f" · {n_ag} agent Buzz · hạn mức live ≠ tổng token lịch sử</div></div>"
+            f"{ui.render_radial_gauge(100.0 - float(wins[0]['used_percent']) if wins else 0.0, size=52, color_override=bar)}"
+            f"</div>"
+            f"<div class='acct-meta' style='margin-top:8px;' title='{agents}'>{homes}</div>"
+            f"{''.join(win_html)}{who_html}</div>"
+        )
+    last = REFRESH.get("last") or 0
+    last_txt = dt.datetime.fromtimestamp(last).strftime("%d/%m %H:%M") if last else "chưa chạy"
+    st = "đang đọc" if REFRESH.get("running") else ("ok" if REFRESH.get("ok") else "lỗi")
+    clast = COLLECT.get("last") or 0
+    clast_txt = dt.datetime.fromtimestamp(clast).strftime("%d/%m %H:%M") if clast else "chưa chạy"
+    cst = "đang thu thập" if COLLECT.get("running") else ("ok" if COLLECT.get("ok") else "lỗi")
+    cn = COLLECT.get("n_req")
+    cextra = (" · %s lượt" % i18n.fmt_number(cn)) if cn else ""
+    head_bar = (
+        '<div class="section-header" style="margin-bottom:12px;">'
+        '<div><div class="section-title">Hạn mức từng tài khoản Codex</div>'
+        f'<div class="section-subtitle">Mỗi email một thẻ · live API /wham/usage · lần đọc {last_txt} ({st})'
+        f' · thu thập lượt {clast_txt} ({cst}{cextra})</div></div>'
+    )
+    if not ui.request_public():
+        head_bar += (
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+            '<form method="post" action="/refresh/quota">'
+            '<button class="btn btn-primary btn-sm" type="submit">Đọc lại hạn mức</button></form>'
+            '<form method="post" action="/refresh/collect">'
+            '<button class="btn btn-secondary btn-sm" type="submit">Thu thập lượt</button></form>'
+            '</div>'
+        )
+    head_bar += "</div>"
+    return head_bar + '<div class="acct-grid">' + "".join(cards) + "</div>"
+
+
+def _email_short(email: str) -> str:
+    e = (email or "").strip()
+    if "@" in e:
+        return e.split("@", 1)[0]
+    return e or "?"
+
+
+def _kind_nick(kind: str) -> str:
+    return {
+        "codex-openai": "openai",
+        "codex-sales": "sales",
+        "codex-creative": "creative",
+        "codex-creative-lead": "creative-lead",
+        "codex-pm": "PM",
+        "codex-pm-lead": "PM-lead",
+    }.get(kind) or kind
+
+
+def codex_people_html(limit: int = 0, compact: bool = False) -> str:
+    """Bang Codex ChatGPT: tung nguoi dung acc nao. Khong gom Hermes/Ollama."""
+    data = ledger.codex_people_breakdown()
+    people = data.get("people") or []
+    accounts = data.get("accounts") or []
+    if limit:
+        people = people[:limit]
+    if not people:
+        return ('<div class="card-section"><div class="section-title">Ai dùng Codex</div>'
+                '<div class="text-muted" style="margin-top:8px;">Chưa có lượt Codex ChatGPT.</div></div>')
+    name_n = {}
+    for p in people:
+        if p.get("kind") == "person":
+            name_n[p["name"]] = name_n.get(p["name"], 0) + 1
+    for p in people:
+        if p.get("kind") == "person" and name_n.get(p["name"], 0) > 1:
+            comm = community_short(p.get("community") or "")
+            if comm:
+                p["name"] = "%s · %s" % (p["name"], comm)
+    name_n2 = {}
+    for p in people:
+        if p.get("kind") == "person":
+            name_n2[p["name"]] = name_n2.get(p["name"], 0) + 1
+    for p in people:
+        if p.get("kind") == "person" and name_n2.get(p["name"], 0) > 1 and p.get("pubkey"):
+            p["name"] = "%s · %s" % (p["name"], p["pubkey"][:8])
+    nick = {kind: email for kind, email in (data.get("kind_email") or {}).items()}
+    col_label = {}
+    for em in accounts:
+        kinds = sorted({k for k, v in nick.items() if v == em})
+        tag = "/".join(_kind_nick(k) for k in kinds) if kinds else ""
+        col_label[em] = "%s\n%s" % (_email_short(em), tag)
+
+    def cell(n, tok):
+        if not n:
+            return "<td class='td-num text-muted'>—</td>"
+        return ("<td class='td-num'><b>%s</b>"
+                "<div class='text-muted' style='font-size:11px;'>%s tok</div></td>"
+                % (i18n.fmt_number(n), i18n.fmt_number(tok)))
+
+    rows = []
+    for p in people:
+        if p["kind"] == "person":
+            href = "/users/" + urllib.parse.quote(p["pubkey"])
+            name = '<a href="%s" style="color:var(--primary);text-decoration:none;"><b>%s</b></a>' % (
+                html.escape(href), html.escape(p["name"]))
+            badge = ""
+        elif p["kind"] == "agent":
+            name = "<b>%s</b>" % html.escape(p["name"])
+            badge = ui.render_badge("agent gọi agent — vẫn trừ quota", "var(--bg-subtle)", "var(--text-muted)")
+        else:
+            name = "<b>%s</b>" % html.escape(p["name"])
+            badge = ui.render_badge("phiên không ghi người gửi", "var(--warning-subtle)", "var(--warning)")
+        if p.get("name_note"):
+            badge += " " + ui.render_badge(p["name_note"], "var(--bg-subtle)", "var(--text-muted)")
+        top = p.get("top_agents") or []
+        top_s = ", ".join("%s (%s)" % (a["name"], i18n.fmt_number(a["n"])) for a in top[:3]) or "—"
+        tds = "".join(cell(p["by_email"].get(em, {}).get("n"), p["by_email"].get(em, {}).get("tok"))
+                      for em in accounts)
+        rows.append(
+            "<tr><td>%s %s<div class='text-muted' style='font-size:11px;max-width:280px;"
+            "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='%s'>%s</div></td>"
+            "<td class='td-num'>%s<div class='text-muted' style='font-size:11px;'>%s tok</div></td>"
+            "%s<td class='td-num'><b>%s</b><div class='text-muted' style='font-size:11px;'>%s tok</div></td></tr>"
+            % (name, badge, html.escape(top_s, quote=True), html.escape(top_s),
+               i18n.fmt_number(p.get("n_today") or 0), i18n.fmt_number(p.get("tok_today") or 0),
+               tds, i18n.fmt_number(p["requests"]), i18n.fmt_number(p["tokens"]))
+        )
+    heads = "".join(
+        "<th class='th-num' title='%s'>%s<div class='text-muted' style='font-size:10px;font-weight:500;'>%s</div></th>"
+        % (html.escape(em, quote=True), html.escape(_email_short(em)),
+           html.escape(col_label[em].split("\n")[-1]))
+        for em in accounts
+    )
+    more = ""
+    if compact and (data.get("people") or []) and limit and len(data["people"]) > limit:
+        more = ('<div style="margin-top:12px;text-align:right;">'
+                '<a href="/users" class="btn btn-secondary btn-sm">Xem hết người × acc →</a></div>')
+    return (
+        '<div class="card-section">'
+        '<div class="section-header"><div>'
+        '<div class="section-title">Ai dùng Codex ChatGPT</div>'
+        '<div class="section-subtitle">Toàn thời gian (không phải hạn mức 5h/7 ngày) · ChatGPT Codex · '
+        'bỏ Hermes/Ollama · %s lượt · %s token · cột Hôm nay = từ 0h ICT</div></div></div>'
+        '<div class="table-wrapper" style="overflow-x:auto;"><table class="data-table">'
+        '<thead><tr><th>Người</th><th class="th-num">Hôm nay</th>%s'
+        '<th class="th-num">Tổng</th></tr></thead>'
+        '<tbody>%s</tbody></table></div>%s</div>'
+        % (i18n.fmt_number(data.get("total_requests") or 0),
+           i18n.fmt_number(data.get("total_tokens") or 0),
+           heads, "".join(rows), more)
+    )
+
+
+def codex_person_html(pubkey: str) -> str:
+    data = ledger.codex_people_breakdown(pubkey=pubkey)
+    people = data.get("people") or []
+    if not people:
+        return ('<div class="card-section"><div class="section-title">Codex ChatGPT</div>'
+                '<p class="text-muted" style="margin-top:8px;">Người này chưa có lượt Codex ChatGPT '
+                '(hoặc chỉ Hermes/Ollama).</p></div>')
+    p = people[0]
+    blocks = []
+    by_em = {}
+    for a in sorted(p.get("agents", {}).values(), key=lambda x: -x["tok"]):
+        by_em.setdefault(a["email"], []).append(a)
+    for em in (data.get("accounts") or []):
+        ags = by_em.get(em) or []
+        if not ags:
+            continue
+        n = sum(a["n"] for a in ags)
+        tok = sum(a["tok"] for a in ags)
+        trs = "".join(
+            "<tr><td>%s</td><td class='text-muted'>%s</td>"
+            "<td class='td-num'>%s</td><td class='td-num'><b>%s</b></td></tr>"
+            % (html.escape(a["name"]), html.escape(_kind_nick(a["kind"])),
+               i18n.fmt_number(a["n"]), i18n.fmt_number(a["tok"]))
+            for a in ags
+        )
+        blocks.append(
+            "<div style='margin-bottom:16px;'>"
+            "<div style='font-weight:700;margin-bottom:6px;'>%s"
+            "<span class='text-muted' style='font-weight:500;'> · %s lượt · %s token</span></div>"
+            "<table class='data-table'><thead><tr><th>Agent</th><th>Harness</th>"
+            "<th class='th-num'>Lượt</th><th class='th-num'>Token</th></tr></thead>"
+            "<tbody>%s</tbody></table></div>"
+            % (html.escape(em), i18n.fmt_number(n), i18n.fmt_number(tok), trs)
+        )
+    return (
+        '<div class="card-section">'
+        '<div class="section-title">Codex ChatGPT của người này</div>'
+        '<div class="section-subtitle">Acc nào · agent nào · không gồm Hermes/Ollama</div>'
+        '<div style="margin-top:12px;">%s</div></div>' % "".join(blocks)
+    )
+
+
+def usage_trend_points(codex_only: bool = True) -> list:
+    now = dt.datetime.now(ICT)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    kinds = ledger.CHATGPT_CODEX_KINDS
+    conn = ledger.connect()
+    points = []
+    try:
+        for i in range(6, -1, -1):
+            s = midnight - dt.timedelta(days=i)
+            e = s + dt.timedelta(days=1)
+            if codex_only:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n, COALESCE(SUM(r.normalized_units),0) AS u "
+                    "FROM requests r JOIN agents a ON a.agent_id = r.agent_id "
+                    "WHERE r.started_at >= ? AND r.started_at < ? "
+                    "AND a.backend_kind IN (?,?,?,?,?,?)",
+                    (int(s.timestamp()), int(e.timestamp())) + tuple(kinds),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n, COALESCE(SUM(normalized_units),0) AS u "
+                    "FROM requests WHERE started_at >= ? AND started_at < ?",
+                    (int(s.timestamp()), int(e.timestamp())),
+                ).fetchone()
+            label = "Hôm nay" if i == 0 else s.strftime("%d/%m")
+            points.append({"label": label, "value": float(row["u"] or 0), "requests": int(row["n"] or 0)})
+    finally:
+        conn.close()
+    return points
+
+
 def v_overview() -> str:
     o = ledger.overview()
-    base = o["base_units_daily"] or 3000000.0
-    units_today = o.get("units_today", 0.0)
-    used_pct = min(100.0, units_today / base * 100.0) if base else 0.0
-    remaining_pct = max(0.0, 100.0 - used_pct)
     unread_alerts = get_unread_alerts_count()
-    
-    # Hero Card: Mức sử dụng hôm nay
-    progress_html = ui.render_progress_bar(used_pct, remaining_pct, height=10, show_label=False)
-    units_fmt = i18n.fmt_number(units_today)
-    base_fmt = i18n.fmt_number(base)
-    
-    hero_html = f"""
-    <div class="hero-card">
-      <div class="hero-header">
-        <div>
-          <div class="hero-label">⚡ {i18n.t("overview.hero_title")}</div>
-          <div class="hero-subtext" style="color:var(--text-muted);font-size:13px;margin-top:2px;">{i18n.t("overview.hero_desc")}</div>
-        </div>
-        <span class="badge" style="background:var(--primary-subtle);color:var(--primary);border:1px solid var(--primary-border);">
-          Hôm nay · 00:00–24:00 ICT
-        </span>
-      </div>
-      
-      <div class="hero-value-group">
-        <div class="hero-value">{used_pct:.1f}%</div>
-        <div class="hero-remaining">Còn lại {remaining_pct:.1f}%</div>
-      </div>
-      
-      {progress_html}
-      
-      <div style="display:flex;justify-content:space-between;font-size:13px;margin-top:12px;color:var(--text-secondary);">
-        <span>Đã tiêu thụ: <b>{units_fmt}</b> / {base_fmt} đơn vị cơ sở</span>
-        <span>Chu kỳ làm mới: <b>00:00 ICT hàng ngày</b></span>
-      </div>
+    units_fmt = i18n.fmt_number(o.get("units_today", 0.0))
+    hero_html = account_cards_html()
+    hero_html += codex_people_html()
+    cx = ledger.codex_people_breakdown()
+    hero_html += f"""
+    <div class="card-section" style="margin-bottom:22px;">
+      <div class="text-muted" style="font-size:13px;">Hôm nay (0h ICT) Codex ChatGPT: <b>{i18n.fmt_number(cx.get('n_today') or 0)}</b> lượt ·
+      <b>{i18n.fmt_number(cx.get('tok_today') or 0)}</b> token.
+      Mọi harness kể cả Hermes/Ollama: <b>{units_fmt}</b> token — không phải hạn mức 5h/7 ngày.</div>
     </div>
     """
-    
-    # 4 Supporting KPIs
+
+    # 4 Supporting KPIs — Codex ChatGPT, khong tron Hermes
     kpis_html = f"""
     <div class="kpi-grid">
-      {ui.render_kpi_card(i18n.t("overview.active_users"), str(o.get("active_users", 0)), "Thành viên có phát sinh yêu cầu hôm nay")}
-      {ui.render_kpi_card(i18n.t("overview.requests_today"), i18n.fmt_number(o.get("requests_today", 0)), f"Thành công: {o.get('requests_today', 0) - o.get('failures_today', 0)}")}
-      {ui.render_kpi_card(i18n.t("overview.running_jobs"), str(o.get("running", 0)), "Đang xử lý trong gateway")}
+      {ui.render_kpi_card("Người Codex", str(cx.get("n_person", 0)), "Người có lượt Codex ChatGPT (đã gộp trùng tên)")}
+      {ui.render_kpi_card("Lượt Codex hôm nay", i18n.fmt_number(cx.get("n_today") or 0), "Từ 0h ICT · chỉ ChatGPT Codex")}
+      {ui.render_kpi_card("Token Codex (cả lịch sử)", i18n.fmt_number(cx.get("total_tokens") or 0), "%s lượt toàn thời gian" % i18n.fmt_number(cx.get("total_requests") or 0))}
       {ui.render_kpi_card(i18n.t("overview.warnings"), str(unread_alerts), "Cảnh báo bất thường đang mở")}
     </div>
     """
@@ -163,29 +873,19 @@ def v_overview() -> str:
     </div>
     """
     
-    # Trend Chart
-    trend_points = [
-        {"label": "03/09", "value": 0.0, "requests": 0},
-        {"label": "04/09", "value": 0.0, "requests": 0},
-        {"label": "05/09", "value": 0.0, "requests": 0},
-        {"label": "06/09", "value": 0.0, "requests": 0},
-        {"label": "07/09", "value": 0.0, "requests": 0},
-        {"label": "08/09", "value": 0.0, "requests": 0},
-        {"label": "Hôm nay", "value": used_pct, "requests": o.get("requests_today", 0)},
-    ]
-    chart_svg = ui.render_svg_trend_chart(trend_points, height=200)
+    # Trend Chart — token that / ngay, khong % han muc mot tai khoan
+    trend_points = usage_trend_points()
+    chart_svg = ui.render_svg_trend_chart(trend_points, height=200, y_format="units")
     
     trend_section = f"""
     <div class="card-section">
       <div class="section-header">
         <div>
           <div class="section-title">{i18n.t("overview.usage_trend")}</div>
-          <div class="section-subtitle">{i18n.t("overview.usage_trend_desc")}</div>
+          <div class="section-subtitle">Token Codex ChatGPT theo ngày ICT — không gồm Hermes/Ollama, không phải % hạn mức acc</div>
         </div>
         <div class="filter-group">
-          <span class="filter-pill active">7 ngày qua</span>
-          <span class="filter-pill">24 giờ qua</span>
-          <span class="filter-pill">30 ngày qua</span>
+          <span class="filter-pill active">7 ngày · Codex ChatGPT</span>
         </div>
       </div>
       {chart_svg}
@@ -193,43 +893,47 @@ def v_overview() -> str:
     """
     
     # 2-Column Section: Top Users & Agent Breakdown
-    users_list = ledger.user_summaries()
+    persons = [p for p in (cx.get("people") or []) if p.get("kind") == "person"]
     top_users_html = []
-    if not users_list:
-        top_users_html.append(ui.render_empty_state("Chưa có dữ liệu người dùng", "Dữ liệu người dùng sẽ xuất hiện sau khi gửi yêu cầu."))
+    if not persons:
+        top_users_html.append(ui.render_empty_state("Chưa có người dùng Codex", "Chưa gắn được lượt Codex ChatGPT cho người."))
     else:
-        for u in sorted(users_list, key=lambda x: -x.get("used_pct", 0.0))[:5]:
-            upct = u.get("used_pct", 0.0)
-            name = u.get("display_name") or (u["principal_pubkey"][:14] + "…")
+        tot_tok = sum(p["tokens"] for p in persons) or 1.0
+        for p in persons[:6]:
+            share = (p["tokens"] / tot_tok) * 100.0
+            name = p["name"]
+            href = "/users/" + urllib.parse.quote(p.get("pubkey") or "")
             avatar_html = ui.render_avatar(name, 24)
             top_users_html.append(f"""
             <div style="margin-bottom:14px;">
               <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:6px;">
                 <div style="display:flex;align-items:center;gap:8px;">
                   {avatar_html}
-                  <b><a href="/users/{u['principal_pubkey']}" style="color:var(--primary);text-decoration:none;">{html.escape(name)}</a></b>
+                  <b><a href="{html.escape(href)}" style="color:var(--primary);text-decoration:none;">{html.escape(name)}</a></b>
                 </div>
-                <span><b>{upct:.1f}%</b> <span class="text-muted">({u.get('requests', 0)} reqs)</span></span>
+                <span><b>{i18n.fmt_number(p['tokens'])}</b> <span class="text-muted">({i18n.fmt_number(p['requests'])} lượt)</span></span>
               </div>
-              {ui.render_progress_bar(upct, show_label=False, height=7)}
+              {ui.render_progress_bar(share, show_label=False, height=7)}
             </div>
             """)
         top_users_html.append(f"""<div style="margin-top:16px;text-align:right;">
           <a href="/users" class="btn btn-secondary btn-sm">{i18n.t("overview.view_all_users")} →</a>
         </div>""")
     
-    agents_list = ledger.agent_summaries()
-    total_agent_units = sum(a.get("units", 0.0) for a in agents_list) or 1.0
+    agents_list = ledger.codex_agent_totals()
+    acounts = name_counts(agents_list)
+    used_agents = [a for a in agents_list if a.get("requests", 0) > 0]
+    total_agent_units = sum(a.get("units", 0.0) for a in used_agents) or 1.0
     agents_breakdown_html = []
-    if not agents_list:
+    if not used_agents:
         agents_breakdown_html.append(ui.render_empty_state("Chưa có dữ liệu Agent", "Chưa có lượt gọi Agent nào."))
     else:
-        for a in sorted(agents_list, key=lambda x: -x.get("units", 0.0)):
+        for a in sorted(used_agents, key=lambda x: -x.get("units", 0.0))[:12]:
             ashare = (a.get("units", 0.0) / total_agent_units) * 100.0
-            aname = agent_label(a["agent_id"])
+            aname = agent_pretty(a, acounts)
             is_agy = a.get("backend_kind") == "agy"
             bcolor = "var(--capacity)" if is_agy else "var(--primary)"
-            tag_label = "Tài khoản AGY" if is_agy else "CLI Cục bộ"
+            tag_label = backend_label(a.get("backend_kind"))
             tag_badge = f'<span class="badge" style="font-size:10.5px;padding:1px 6px;background:var(--bg-subtle);color:{bcolor};">{tag_label}</span>'
             
             agents_breakdown_html.append(f"""
@@ -250,8 +954,8 @@ def v_overview() -> str:
       <div class="card-section" style="margin-bottom:0;">
         <div class="section-header">
           <div>
-            <div class="section-title">{i18n.t("overview.top_users")}</div>
-            <div class="section-subtitle">{i18n.t("overview.top_users_desc")}</div>
+            <div class="section-title">Người dùng Codex</div>
+            <div class="section-subtitle">Token ChatGPT Codex toàn thời gian — không phải % hạn nội bộ hôm nay</div>
           </div>
         </div>
         {''.join(top_users_html)}
@@ -260,8 +964,8 @@ def v_overview() -> str:
       <div class="card-section" style="margin-bottom:0;">
         <div class="section-header">
           <div>
-            <div class="section-title">{i18n.t("overview.agent_breakdown")}</div>
-            <div class="section-subtitle">{i18n.t("overview.agent_breakdown_desc")}</div>
+            <div class="section-title">Agent Codex</div>
+            <div class="section-subtitle">Toàn thời gian · chỉ ChatGPT Codex (sales/creative/PM/openai)</div>
           </div>
         </div>
         {''.join(agents_breakdown_html)}
@@ -269,7 +973,7 @@ def v_overview() -> str:
     </div>
     """
     
-    # Distinct Section: Dung lượng tài khoản AGY
+    # Khoi rieng: Han muc nha cung cap (ChatGPT / Ollama Cloud)
     agy_cards = []
     for a in agents_list:
         if a.get("backend_kind") == "agy":
@@ -362,6 +1066,7 @@ def v_overview() -> str:
     </div>
     """
     
+    capacity_section = codex_accounts_section()
     body = f"{hero_html}\n{kpis_html}\n{mode_banner}\n{trend_section}\n{two_col_section}\n<div style='height:24px;'></div>\n{capacity_section}\n{activity_section}"
     return ui.render_page("Tổng quan", "/", body, i18n.t("app.subtitle"), unread_alerts=unread_alerts)
 
@@ -428,6 +1133,7 @@ def v_users(qs: dict) -> str:
         table_content = ui.render_empty_state("Không tìm thấy người dùng", i18n.t("users.empty_users"))
     else:
         tbody = []
+        ucounts = name_counts(filtered_users)
         for u in filtered_users:
             st = u.get("status")
             st_text, st_fg, st_bg, st_border = i18n.translate_threshold(st)
@@ -435,7 +1141,7 @@ def v_users(qs: dict) -> str:
             rem_pct = u.get("remaining_pct", 100.0 - upct)
             p_label = i18n.translate_profile(u.get("profile_id"))
             short_pk = u["principal_pubkey"][:14] + "…"
-            d_name = u.get("display_name") or short_pk
+            d_name = person_pretty(u, ucounts)
             top_agent = agent_label(u.get("most_used_agent")) if u.get("most_used_agent") else "—"
             
             pbar = ui.render_progress_bar(upct, show_label=False, height=7)
@@ -483,11 +1189,12 @@ def v_users(qs: dict) -> str:
         </div>"""
         
     body = f"""
+    {codex_people_html()}
     <div class="card-section">
       <div class="section-header">
         <div>
-          <div class="section-title">{i18n.t("users.title")}</div>
-          <div class="section-subtitle">{i18n.t("users.subtitle")}</div>
+          <div class="section-title">Hạn mức nội bộ (không phải quota ChatGPT)</div>
+          <div class="section-subtitle">% trên 3 triệu token/ngày do dashboard tự đặt — khác hạn mức 5 giờ / 7 ngày của từng acc Codex. NcThang/Audi = 0% nghĩa là hôm nay chưa gọi, không phải chưa từng dùng.</div>
         </div>
       </div>
       {filter_bar_html}
@@ -549,7 +1256,7 @@ def v_user_detail(pubkey: str) -> str:
       {progress_bar}
       
       <div style="display:flex;justify-content:space-between;font-size:13px;margin-top:12px;color:var(--text-secondary);">
-        <span>Đã sử dụng: <b>{units_fmt}</b> / {eff_fmt} đơn vị được cấp</span>
+        <span>Hạn nội bộ hôm nay: <b>{units_fmt}</b> / {eff_fmt} (không phải quota ChatGPT 5h/7 ngày)</span>
         <span>{u.get('requests', 0)} {i18n.t('users.detail_stats_requests')} · {u.get('running', 0)} {i18n.t('users.detail_stats_running')}</span>
       </div>
     </div>
@@ -601,6 +1308,7 @@ def v_user_detail(pubkey: str) -> str:
     by_agent_section = f"""
     <div class="card-section">
       <div class="section-title">{i18n.t("users.usage_by_agent")}</div>
+      <div class="section-subtitle">Chỉ hôm nay (0h ICT) — xem Codex toàn thời gian ở khung phía trên</div>
       <div style="margin-top:12px;">{agent_table}</div>
     </div>
     """
@@ -691,7 +1399,7 @@ def v_user_detail(pubkey: str) -> str:
     
     back_link = f'<div style="margin-bottom:16px;"><a href="/users" class="btn btn-secondary btn-sm">{i18n.t("users.back_to_users")}</a></div>'
     
-    body = f"{back_link}\n{hero_user}\n{assign_box}\n{by_agent_section}\n{recent_req_section}\n{tech_details_html}"
+    body = f"{back_link}\n{hero_user}\n{codex_person_html(pubkey)}\n{assign_box}\n{by_agent_section}\n{recent_req_section}\n{tech_details_html}"
     return ui.render_page(f"Người dùng: {d_name}", "/users", body, f"Chi tiết tài nguyên và mức cấp của {d_name}", unread_alerts=unread_alerts)
 
 
@@ -702,33 +1410,39 @@ def v_user_detail(pubkey: str) -> str:
 def v_agents() -> str:
     agents = ledger.agent_summaries()
     unread_alerts = get_unread_alerts_count()
-    
-    total_units = sum(a.get("units", 0.0) for a in agents) or 1.0
+    acounts = name_counts(agents)
+    used = [a for a in agents if a.get("requests", 0) > 0]
+    total_units = sum(a.get("units", 0.0) for a in used) or 1.0
     
     rows_html = []
     cards_html = []
     
-    for a in agents:
-        aname = agent_label(a["agent_id"])
+    for a in sorted(agents, key=lambda x: -x.get("units", 0.0)):
+        aname = agent_pretty(a, acounts)
         share_pct = (a.get("units", 0.0) / total_units) * 100.0
         b_kind = a.get("backend_kind")
-        is_agy = b_kind == "agy"
-        
+        # Ban goc: chi harness "agy" moi duoc coi la co han muc nha cung cap.
+        # He nay lay han muc tu chinh phien Codex (bin/buzz_quota.py ghi vao
+        # account_capacity_snapshots), nen bat ky harness nao co snapshot deu
+        # phai hien phan han muc.
+        is_agy = bool(a.get("capacity"))
+
         if is_agy:
-            backend_badge = '<span class="badge" style="background:var(--capacity-subtle);color:var(--capacity);border:1px solid var(--capacity-border);">Tài khoản AGY</span>'
+            backend_badge = f'<span class="badge" style="background:var(--capacity-subtle);color:var(--capacity);border:1px solid var(--capacity-border);">{backend_label(b_kind)}</span>'
             cap_html = capacity_block(a)
             caps = a.get("capacity") or []
             vals = [c["remaining_percent"] for c in caps if c.get("remaining_percent") is not None]
             lowest = min(vals) if vals else None
             gauge_html = ui.render_radial_gauge(lowest if lowest is not None else 100.0, size=46, color_override="var(--capacity)")
         else:
-            backend_badge = '<span class="badge" style="background:var(--primary-subtle);color:var(--primary);border:1px solid var(--primary-border);">CLI Cục bộ</span>'
+            backend_badge = f'<span class="badge" style="background:var(--primary-subtle);color:var(--primary);border:1px solid var(--primary-border);">{backend_label(b_kind)}</span>'
             cap_html = f'<span class="text-muted">{i18n.t("agents.local_cli_note")}</span>'
             gauge_html = ui.render_radial_gauge(100.0, size=46, color_override="var(--primary)")
             
         pbar = ui.render_progress_bar(share_pct, show_label=False, height=6, color_override="#2563eb")
         
-        cards_html.append(f"""
+        if a.get("requests", 0) > 0:
+            cards_html.append(f"""
         <div class="kpi-card" style="border-left:3px solid {'var(--capacity)' if is_agy else 'var(--primary)'};">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;">
             <div>
@@ -764,7 +1478,7 @@ def v_agents() -> str:
           <td style="min-width:260px;">{cap_html}</td>
         </tr>""")
         
-    cards_section = f"""<div class="kpi-grid" style="margin-bottom:24px;">{''.join(cards_html)}</div>"""
+    cards_section = f"""<div class="kpi-grid" style="margin-bottom:24px;">{''.join(cards_html[:18])}</div>"""
     
     table_content = f"""<div class="table-wrapper">
       <table class="data-table">
@@ -804,7 +1518,9 @@ def v_agents() -> str:
       {note_box}
     </div>
     """
-    return ui.render_page(i18n.t("agents.title"), "/agents", body, i18n.t("agents.subtitle"), unread_alerts=unread_alerts)
+    return ui.render_page(i18n.t("agents.title"), "/agents", body,
+                          f"{len(used)} agent có lượt / {len(agents)} trong state · trùng tên gắn community",
+                          unread_alerts=unread_alerts)
 
 
 # ===========================================================================
@@ -812,6 +1528,10 @@ def v_agents() -> str:
 # ===========================================================================
 
 def v_calibration(qs: dict) -> str:
+    # Gia tri that de mo phong bam theo, thay vi con so 3.000.000 ghi cung.
+    sim_base = int(float(ledger.get_setting("base_units_daily", "3000000") or 3000000))
+    sim_base_fmt = i18n.fmt_number(sim_base)
+    sim_base_short = "%.1fM" % (sim_base / 1_000_000.0)
     window = (qs.get("window") or ["today"])[0]
     unread_alerts = get_unread_alerts_count()
     
@@ -992,20 +1712,20 @@ def v_calibration(qs: dict) -> str:
       <div style="background:var(--bg-subtle);padding:18px 22px;border-radius:var(--radius-lg);margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
           <span style="font-weight:600;color:var(--text-primary);">Hạn mức cơ sở mô phỏng:</span>
-          <span id="sim-val-display" style="font-size:18px;font-weight:800;color:var(--primary);">3.000.000 đơn vị</span>
+          <span id="sim-val-display" style="font-size:18px;font-weight:800;color:var(--primary);">{sim_base_fmt} đơn vị</span>
         </div>
-        <input type="range" id="sim-slider" min="500000" max="10000000" step="500000" value="3000000" 
+        <input type="range" id="sim-slider" min="500000" max="10000000" step="500000" value="{sim_base}" 
                style="width:100%;cursor:pointer;" oninput="updateSimulation(this.value)">
         <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-muted);margin-top:6px;">
           <span>500K</span>
-          <span>3.0M (Mặc định)</span>
+          <span>{sim_base_short} (hiện tại)</span>
           <span>5.0M</span>
           <span>10.0M</span>
         </div>
       </div>
       
       <div id="sim-result-box" style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
-        💡 Với hạn ngạch <b>3.000.000 đơn vị</b>, 100% người dùng hiện tại đều nằm trong ngưỡng an toàn (&lt;70%).
+        💡 Hạn ngạch hiện tại <b>{sim_base_fmt} đơn vị/ngày</b> — suy ra từ hạn mức thật của nhà cung cấp, không phải con số đặt tay.
       </div>
     </div>
     
@@ -1281,6 +2001,43 @@ def v_settings() -> str:
     ]
     
     settings_dict = {k: ledger.get_setting(k) for k in keys}
+    last = REFRESH.get("last") or 0
+    last_txt = dt.datetime.fromtimestamp(last).strftime("%d/%m %H:%M:%S") if last else "chưa chạy"
+    quota_st = "đang đọc" if REFRESH.get("running") else ("ổn" if REFRESH.get("ok") else "lỗi")
+    clast = COLLECT.get("last") or 0
+    clast_txt = dt.datetime.fromtimestamp(clast).strftime("%d/%m %H:%M:%S") if clast else "chưa chạy"
+    collect_st = "đang thu thập" if COLLECT.get("running") else ("ổn" if COLLECT.get("ok") else "lỗi")
+    cn = COLLECT.get("n_req")
+    collect_sub = "Tự chạy mỗi 10 phút · trạng thái: " + collect_st
+    if cn is not None:
+        collect_sub = ("%s lượt trong sổ · " % i18n.fmt_number(cn)) + collect_sub
+    public = ui.request_public()
+    owner = ui.request_owner()
+
+    publish_section = f"""
+    <div class="card-section">
+      <div class="section-header">
+        <div>
+          <div class="section-title">Công khai & vận hành</div>
+          <div class="section-subtitle">Dashboard lắng nghe loopback · Funnel cổng 8443 (443 giữ /dim0 /fairies)</div>
+        </div>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:0;">
+        {ui.render_kpi_card("Chủ sở hữu", html.escape(owner), "Pubkey trong settings.owner_pubkeys")}
+        {ui.render_kpi_card("Xem local", "8787", html.escape(LOCAL_URL))}
+        {ui.render_kpi_card("Xem internet", "8443", html.escape(FUNNEL_URL))}
+        {ui.render_kpi_card("Đọc hạn mức Codex", last_txt, "Live API mỗi 5 phút · trạng thái: " + quota_st)}
+        {ui.render_kpi_card("Thu thập lượt", clast_txt, collect_sub)}
+      </div>
+      <div class="text-muted" style="margin-top:14px;font-size:13px;line-height:1.5;">
+        Link gửi người ngoài: <a href="{html.escape(FUNNEL_URL)}/" style="color:var(--primary);">{html.escape(FUNNEL_URL)}/</a>
+        · bản Funnel chỉ đọc (đổi cài đặt bị chặn).<br>
+        Máy này: <a href="{html.escape(LOCAL_URL)}" style="color:var(--primary);">{html.escape(LOCAL_URL)}</a>
+        · tự bật lại sau đăng nhập Windows (task BuzzUsageDashboard).
+        Collector đọc mọi file trong custom_harnesses (Codex / Claude / Hermes) nên harness mới không bị miss.
+      </div>
+    </div>
+    """
     
     mode_banner = f"""
     <div class="card-section">
@@ -1300,7 +2057,15 @@ def v_settings() -> str:
     </div>
     """
     
-    policy_form = f"""
+    if public:
+        policy_form = """
+    <div class="card-section">
+      <div class="section-title">Chính sách hạn mức</div>
+      <p class="text-muted" style="margin-top:8px;">Bản xem công khai — không đổi ngưỡng từ internet. Dùng bản local trên máy chủ.</p>
+    </div>
+    """
+    else:
+        policy_form = f"""
     <div class="card-section">
       <div class="section-header">
         <div>
@@ -1361,7 +2126,7 @@ def v_settings() -> str:
           </div>
           <div>
             <div class="text-muted">{i18n.t("settings.poll_interval_label")}</div>
-            <div style="font-weight:600;">{settings_dict.get('capacity_poll_interval_seconds', '600')} giây (10 phút)</div>
+            <div style="font-weight:600;">300 giây (5 phút) — đọc hạn mức Codex</div>
           </div>
         </div>
       </div>
@@ -1402,7 +2167,7 @@ def v_settings() -> str:
     </details>
     """
     
-    body = f"{mode_banner}\n{policy_form}\n{timing_access}\n{debug_section}"
+    body = f"{publish_section}\n{mode_banner}\n{policy_form}\n{timing_access}\n{debug_section}"
     return ui.render_page(i18n.t("settings.title"), "/settings", body, i18n.t("settings.subtitle"), unread_alerts=unread_alerts)
 
 
@@ -1413,6 +2178,20 @@ def v_settings() -> str:
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # keep dashboard logs free of request telemetry
+
+    def _is_public(self) -> bool:
+        host = (self.headers.get("Host") or "").lower()
+        proto = (self.headers.get("X-Forwarded-Proto") or "").lower()
+        return "ts.net" in host or proto == "https"
+
+    def _bind_ctx(self) -> bool:
+        public = self._is_public()
+        try:
+            owner = owner_display_name()
+        except Exception:
+            owner = "Chủ sở hữu"
+        ui.set_request_ctx(owner=owner, public=public)
+        return public
 
     def _send(self, code: int, content: str, ctype: str = "text/html; charset=utf-8"):
         data = content.encode("utf-8")
@@ -1429,6 +2208,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        self._bind_ctx()
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -1470,7 +2250,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, ui.render_page("Lỗi hệ thống", "/", err_html))
 
     def do_POST(self):
+        public = self._bind_ctx()
         path = urllib.parse.urlparse(self.path).path
+        if public:
+            self._send(403, "Ban xem cong khai: khong doi cai dat tu internet.", "text/plain; charset=utf-8")
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
@@ -1490,6 +2274,12 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     pass
                 self._redirect("/alerts")
+            elif path == "/refresh/quota":
+                threading.Thread(target=refresh_quota, args=("manual",), daemon=True).start()
+                self._redirect("/")
+            elif path == "/refresh/collect":
+                threading.Thread(target=refresh_collect, args=("manual",), daemon=True).start()
+                self._redirect("/")
             elif path == "/settings/policy":
                 try:
                     base = int((form.get("base_units_daily") or [""])[0])
@@ -1510,11 +2300,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, ui.render_page("Lỗi hệ thống", "/", err_html))
 
 
+class DashboardServer(ThreadingHTTPServer):
+    """Chi mot dashboard giu cong 8787 (SPEC V5).
+
+    HTTPServer mac dinh bat SO_REUSEADDR; tren Windows no cho tien trinh thu hai
+    bind chung cong, nen watchdog (health cham > 3s) de ra nhieu dashboard, moi
+    cai tu chay quota/collector ghi usage.db."""
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main():
+    # Bind truoc: ban thua thoat ngay, khong kip khoi tao DB hay chay poller.
+    server = DashboardServer((HOST, PORT), Handler)
     ledger.init_db()
     ledger.ensure_canonical_agents()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"AI Usage Center listening on http://{HOST}:{PORT} (owner-only, local bind)")
+    try:
+        conn = ledger.connect()
+        try:
+            COLLECT["n_req"] = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    threading.Thread(target=quota_poller, name="quota-poller", daemon=True).start()
+    threading.Thread(target=collect_poller, name="collect-poller", daemon=True).start()
+    print(f"AI Usage Center listening on http://{HOST}:{PORT} (loopback; Funnel 8443 = xem cong khai)")
     sys.stdout.flush()
     server.serve_forever()
 

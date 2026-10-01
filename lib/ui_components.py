@@ -11,9 +11,25 @@ Linear / Stripe / Vercel / Raycast quality:
 """
 
 import html
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import i18n
+
+_ctx = threading.local()
+
+
+def set_request_ctx(owner: str = "Chủ sở hữu", public: bool = False) -> None:
+    _ctx.owner = owner
+    _ctx.public = public
+
+
+def request_owner() -> str:
+    return getattr(_ctx, "owner", None) or "Chủ sở hữu"
+
+
+def request_public() -> bool:
+    return bool(getattr(_ctx, "public", False))
 
 BASE_CSS = """
 <style>
@@ -1143,6 +1159,61 @@ details.custom-details[open] summary {
   .kpi-grid { grid-template-columns: 1fr; }
   .hero-value { font-size: 34px; }
 }
+
+.acct-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 22px;
+}
+.acct-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  padding: 18px 20px 16px;
+  position: relative;
+  overflow: hidden;
+}
+.acct-card::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: var(--acct-bar, var(--primary));
+}
+.acct-mail {
+  font-weight: 700;
+  font-size: 14px;
+  word-break: break-all;
+}
+.acct-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.acct-win {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+.acct-win-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.public-banner {
+  background: var(--warning-subtle);
+  border: 1px solid var(--warning-border);
+  color: var(--warning);
+  border-radius: var(--radius-md);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
 </style>
 """
 
@@ -1254,13 +1325,24 @@ def render_kpi_card(title: str, value: str, subtext: Optional[str] = None,
     </div>"""
 
 
-def render_svg_trend_chart(points: List[Dict[str, Any]], height: int = 190) -> str:
+def _fmt_axis(v: float, y_format: str) -> str:
+    if y_format == "pct":
+        return f"{v:.0f}%"
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    if v >= 1000:
+        return f"{v/1000:.0f}k"
+    return f"{v:.0f}"
+
+
+def render_svg_trend_chart(points: List[Dict[str, Any]], height: int = 190,
+                           y_format: str = "pct") -> str:
     if not points:
         return "<p class='text-muted' style='padding:20px;text-align:center;'>Chưa đủ dữ liệu biểu đồ.</p>"
     
     w = 640
     h = height
-    pad_l = 45
+    pad_l = 52
     pad_r = 20
     pad_t = 20
     pad_b = 30
@@ -1301,7 +1383,7 @@ def render_svg_trend_chart(points: List[Dict[str, Any]], height: int = 190) -> s
         gy = pad_t + chart_h * (1.0 - step)
         gval = max_val * step
         grid_lines.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{w - pad_r}" y2="{gy:.1f}" stroke="var(--border-default)" stroke-dasharray="3,3"/>')
-        grid_lines.append(f'<text x="{pad_l - 8}" y="{gy + 4:.1f}" font-size="10" fill="var(--text-muted)" text-anchor="end">{gval:.0f}%</text>')
+        grid_lines.append(f'<text x="{pad_l - 8}" y="{gy + 4:.1f}" font-size="10" fill="var(--text-muted)" text-anchor="end">{_fmt_axis(gval, y_format)}</text>')
     
     x_labels = []
     for x, y, p in coords:
@@ -1310,7 +1392,7 @@ def render_svg_trend_chart(points: List[Dict[str, Any]], height: int = 190) -> s
     
     dots = []
     for x, y, p in coords:
-        val_str = f"{p.get('value', 0.0):.1f}%".replace(".", ",")
+        val_str = _fmt_axis(float(p.get("value", 0.0) or 0.0), y_format)
         reqs = p.get("requests", 0)
         dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="#3b82f6" stroke="var(--bg-card)" stroke-width="2.5" style="cursor:pointer;"><title>{p.get("label")}: {val_str} ({reqs} yêu cầu)</title></circle>')
 
@@ -1587,8 +1669,8 @@ def render_page(title: str, active_route: str, body_html: str, subtitle: str = "
           
           <!-- Owner Profile Badge -->
           <div class="user-owner-badge" title="Chủ sở hữu hệ thống">
-            {render_avatar("NcThang", 22)}
-            <span>NcThang</span>
+            {render_avatar(request_owner(), 22)}
+            <span>{html.escape(request_owner())}</span>
           </div>
           
           <!-- Reload button -->
@@ -1611,6 +1693,7 @@ def render_page(title: str, active_route: str, body_html: str, subtitle: str = "
 
       <!-- Main Content -->
       <main class="content-container">
+        {('<div class="public-banner">Bản xem công khai · chỉ đọc · không đổi cài đặt từ internet</div>' if request_public() else '')}
         {body_html}
       </main>
     </div>
