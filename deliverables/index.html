@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deliverable Preview | MV-VID-01</title>
+  <style>
+    :root {
+      --bg: #090a10;
+      --card-bg: #121522;
+      --border: #22283e;
+      --accent: #f97316;
+      --accent-glow: rgba(249, 115, 22, 0.2);
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 24px 16px;
+    }
+    .container {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand h1 { font-size: 1.4rem; color: #fff; }
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+    }
+    @media (min-width: 840px) {
+      .grid { grid-template-columns: 420px 1fr; }
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    }
+    .card h2 {
+      font-size: 1.1rem;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #f8fafc;
+    }
+    video {
+      width: 100%;
+      border-radius: 10px;
+      background: #000;
+      outline: none;
+      aspect-ratio: 9 / 16;
+      max-height: 600px;
+      object-fit: contain;
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+    .btn-outline:hover { color: #fff; border-color: #475569; }
+    iframe {
+      width: 100%;
+      height: 600px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+    }
+    .meta-box {
+      margin-top: 24px;
+      background: rgba(255,255,255,0.02);
+      border-radius: 10px;
+      padding: 16px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <h1>🎬 Deliverable Review: MV-VID-01</h1>
+        <span class="status-badge">● Ready for Review</span>
+      </div>
+      <div>
+        <a href="MV_VID_01_SCRIPT_DRAFT_V1.html" target="_blank" class="btn btn-outline">Mở kịch bản toàn màn hình ↗</a>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Cột Video -->
+      <div class="card">
+        <h2>🎬 Video Demo Preview (9:16)</h2>
+        <video controls playsinline preload="metadata" poster="">
+          <source src="MV_VID_01_PREVIEW_DEMO.mp4" type="video/mp4">
+          Trình duyệt của bạn không hỗ trợ phát thẻ video trực tiếp.
+        </video>
+        <div class="btn-row">
+          <a href="MV_VID_01_PREVIEW_DEMO.mp4" download class="btn">📥 Tải video MP4 (2.76 MB)</a>
+        </div>
+      </div>
+
+      <!-- Cột Kịch bản -->
+      <div class="card">
+        <h2>📄 Kịch bản & Phân cảnh Storyboard</h2>
+        <iframe src="MV_VID_01_SCRIPT_DRAFT_V1.html" title="Script View"></iframe>
+      </div>
+    </div>
+
+    <div class="meta-box">
+      <strong>Thông tin chiến dịch:</strong> CAMP-2026-Q4-01 &bull; <strong>Format:</strong> Shorts / Reels / TikTok (30s) &bull; <strong>Chủ đề:</strong> Phân loại & Đối chiếu mã HS Code nhập khẩu.
+    </div>
+  </div>
+</body>
+</html>
