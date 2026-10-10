@@ -35,6 +35,27 @@ Script `install.sh` sẽ tự động thực hiện:
 
 ---
 
+## 🤖 Dành Cho AI Coding Agents (Agent-Ready & Autonomous)
+
+Nếu bạn giao việc cho bất kỳ **AI Coding Agent** nào (Claude Code, Antigravity, Cursor, Codex, OpenClaw, Hermes):
+
+Agent chỉ cần chạy **Agent Doctor**:
+```bash
+# 1. Chẩn đoán môi trường máy (Trả về JSON chuẩn cho Agent)
+python3 bin/agent-doctor.py --json
+
+# 2. Tự động phát hiện OS (Linux / WSL2 / Windows Native) và cài đặt chuẩn xác
+python3 bin/agent-doctor.py --install
+
+# 3. Kiểm thử xác thực E2E toàn diện (Exit code 0 = Đã sẵn sàng 100%)
+python3 bin/agent-doctor.py --verify
+```
+
+Tài liệu chỉ dẫn kiến trúc và quy chuẩn chi tiết cho Agent được lưu tại [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md) và [`.cursorrules`](.cursorrules).
+
+
+---
+
 ## ✨ Các Tính Năng Nâng Cấp Nổi Bật (Key Features)
 
 ### 1. ⚡ Hộp Thư Nhanh Đa Nhóm (Glassmorphic Message Hub Drawer)
