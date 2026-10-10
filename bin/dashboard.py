@@ -3140,7 +3140,7 @@ class DashboardServer(ThreadingHTTPServer):
     bind chung cong, nen watchdog (health cham > 3s) de ra nhieu dashboard, moi
     cai tu chay quota/collector ghi usage.db."""
 
-    allow_reuse_address = False
+    allow_reuse_address = True
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
