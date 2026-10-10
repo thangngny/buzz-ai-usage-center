@@ -267,6 +267,13 @@ class BuzzSoundNotifier:
             env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
 
         def _play():
+            if sys.platform == "win32":
+                try:
+                    import winsound
+                    winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    return
+                except Exception as wex:
+                    log(f"Windows audio error: {wex}")
             try:
                 res = subprocess.run(["paplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
                 if res.returncode != 0:
@@ -291,6 +298,15 @@ class BuzzSoundNotifier:
         icon = BUZZ_ICON_PATH if os.path.exists(BUZZ_ICON_PATH) else "dialog-information"
 
         def _notify():
+            if sys.platform == "win32":
+                try:
+                    clean_t = title.replace('"', '`"')
+                    clean_b = body.replace('"', '`"')
+                    ps_cmd = f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; $tmpl = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); $txts = $tmpl.GetElementsByTagName("text"); $txts.Item(0).AppendChild($tmpl.CreateTextNode("{clean_t}")) > $null; $txts.Item(1).AppendChild($tmpl.CreateTextNode("{clean_b}")) > $null; $toast = [Windows.UI.Notifications.ToastNotification]::new($tmpl); [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Buzz").Show($toast);'
+                    subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+                except Exception:
+                    pass
             try:
                 subprocess.run([
                     "notify-send",

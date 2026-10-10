@@ -399,6 +399,13 @@ def play_audio_alert(is_mention: bool = False, custom_sound: str = None):
     env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
 
     def _play_proc():
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            except Exception:
+                pass
         try:
             res = subprocess.run(["paplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
             if res.returncode != 0:
