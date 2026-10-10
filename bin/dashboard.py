@@ -15,10 +15,14 @@ import json
 import os
 import socket
 import subprocess
+import re
 import sys
 import threading
 import time
+import datetime
+import sqlite3
 import urllib.parse
+from typing import Any, Dict, List, Optional
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
@@ -328,6 +332,496 @@ def get_unread_alerts_count() -> int:
         return sum(1 for a in alerts if a.get("status") != "acknowledged")
     except Exception:
         return 0
+
+
+# ===========================================================================
+# Unified Multi-Source Real-Time Message Hub & Continuous Sync Engine
+# ===========================================================================
+import sqlite3
+import threading
+import subprocess
+from typing import Set, Tuple
+
+HOME = os.path.expanduser("~")
+APP_DATA_DIR = os.path.join(HOME, ".local/share/xyz.block.buzz.app")
+SOUNDS_DIR = os.path.join(APP_DATA_DIR, "sounds")
+CONFIG_DIR = os.path.join(HOME, ".config/buzz")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "sound-notifier.json")
+DB_LOCALSTORAGE = os.path.join(APP_DATA_DIR, "localstorage", "tauri_localhost_0.localstorage")
+DB_HEAD = os.path.join(APP_DATA_DIR, "channel-head-cache.db")
+DB_ARCHIVE = os.path.join(HOME, ".buzz/archive/archive.db")
+DB_UNREAD = os.path.join(APP_DATA_DIR, "observed-unread.db")
+LATEST_MSGS_FILE = os.path.join(APP_DATA_DIR, "latest_messages.json")
+MY_PUBKEY = "2da3184b999140883867865a09b97d61397a5265e209fe9c58b93c59f3f0001e"
+
+LAST_SOUND_PLAY_TIME = 0.0
+SOUND_LOCK = threading.Lock()
+
+def load_sound_config() -> Dict[str, Any]:
+    default_cfg = {
+        "enabled": True,
+        "sound_message": os.path.join(SOUNDS_DIR, "elevenlabs_thang.wav"),
+        "sound_mention": os.path.join(SOUNDS_DIR, "mention.wav"),
+        "debounce_ms": 350
+    }
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                default_cfg.update(cfg)
+        except Exception:
+            pass
+    return default_cfg
+
+def play_audio_alert(is_mention: bool = False, custom_sound: str = None):
+    global LAST_SOUND_PLAY_TIME
+    with SOUND_LOCK:
+        now = time.time()
+        cfg = load_sound_config()
+        if not cfg.get("enabled", True):
+            return
+        debounce_sec = max(0.1, cfg.get("debounce_ms", 350) / 1000.0)
+        if (now - LAST_SOUND_PLAY_TIME) < debounce_sec:
+            return
+        LAST_SOUND_PLAY_TIME = now
+
+    sound_path = custom_sound
+    if not sound_path:
+        sound_path = cfg.get("sound_mention") if is_mention else cfg.get("sound_message")
+    
+    if not sound_path or not os.path.exists(sound_path):
+        sound_path = os.path.join(SOUNDS_DIR, "elevenlabs_thang.wav")
+        if not os.path.exists(sound_path):
+            sound_path = "/usr/share/sounds/Yaru/stereo/message-new-instant.oga"
+
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
+
+    def _play_proc():
+        try:
+            res = subprocess.run(["paplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            if res.returncode != 0:
+                subprocess.run(["pw-play", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        except Exception:
+            try:
+                subprocess.run(["aplay", "-q", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            except Exception:
+                pass
+
+    threading.Thread(target=_play_proc, daemon=True).start()
+
+PENDING_CMDS = []
+CMD_RESULTS = {}
+CMD_LOCK = threading.Lock()
+
+class UnifiedMessageHub:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.communities: Dict[str, str] = {
+            "wss://dukickk.communities.buzz.xyz": "dukickk",
+            "wss://platogroup.communities.buzz.xyz": "platogroup",
+            "wss://ncthang04.communities.buzz.xyz": "ncthang04",
+            "wss://ode.communities.buzz.xyz": "ode",
+            "dukickk": "dukickk",
+            "platogroup": "platogroup",
+            "ncthang04": "ncthang04",
+            "ode": "ode"
+        }
+        self.channel_names: Dict[str, str] = {}
+        self.user_names: Dict[str, str] = {
+            MY_PUBKEY: "NcThang"
+        }
+        self.dm_channels: Dict[str, Dict[str, Any]] = {} # chid -> {relay, participants}
+        self.messages: Dict[str, Dict[str, Any]] = {}
+        self.seen_event_ids: Set[str] = set()
+        self.running = True
+
+        self.load_metadata()
+        self.sync_all(initial=True)
+
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def load_metadata(self):
+        if not os.path.exists(DB_LOCALSTORAGE):
+            return
+        try:
+            conn = sqlite3.connect(f"file:{DB_LOCALSTORAGE}?mode=ro", uri=True)
+            c = conn.cursor()
+            c.execute("SELECT value FROM ItemTable WHERE key='buzz-communities'")
+            row = c.fetchone()
+            if row:
+                val = row[0].decode("utf-16le") if isinstance(row[0], bytes) else row[0]
+                for comm in json.loads(val):
+                    name = comm.get("name", "")
+                    if comm.get("relayUrl"): self.communities[comm["relayUrl"]] = name
+                    if comm.get("id"): self.communities[comm["id"]] = name
+
+            c.execute("SELECT key, value FROM ItemTable WHERE key LIKE 'buzz-user-labels%'")
+            for k, v in c.fetchall():
+                val = v.decode("utf-16le") if isinstance(v, bytes) else str(v)
+                try:
+                    data = json.loads(val)
+                    for pk, pinfo in data.get("profiles", {}).items():
+                        dname = pinfo.get("displayName") or pinfo.get("name") or pinfo.get("nip05")
+                        if dname: self.user_names[pk] = dname
+                except Exception:
+                    pass
+
+            c.execute("SELECT key, value FROM ItemTable WHERE key LIKE 'buzz-self-profile%'")
+            for k, v in c.fetchall():
+                val = v.decode("utf-16le") if isinstance(v, bytes) else str(v)
+                try:
+                    data = json.loads(val)
+                    if isinstance(data, dict) and data.get("displayName"):
+                        self.user_names[MY_PUBKEY] = data["displayName"]
+                except Exception:
+                    pass
+
+            c.execute("SELECT key, value FROM ItemTable WHERE key LIKE 'buzz-channels.%'")
+            for k, v in c.fetchall():
+                val = v.decode("utf-16le") if isinstance(v, bytes) else str(v)
+                try:
+                    data = json.loads(val)
+                    for ch in data.get("channels", []):
+                        cid = ch.get("id")
+                        cname = ch.get("name")
+                        if cid:
+                            # Check for DM participants
+                            participants = ch.get("participants", [])
+                            partner_name = ""
+                            for p in participants:
+                                if p != MY_PUBKEY and p in self.user_names:
+                                    partner_name = self.user_names[p]
+                                    break
+                            if partner_name:
+                                self.dm_channels[cid] = partner_name
+                                self.channel_names[cid] = f"DM ({partner_name})"
+                            elif cname:
+                                self.channel_names[cid] = cname
+                except Exception:
+                    pass
+            conn.close()
+        except Exception:
+            pass
+
+    def resolve_community(self, scope: str) -> str:
+        if not scope: return "Buzz"
+        s_lower = scope.lower()
+        for r_url, cname in self.communities.items():
+            if r_url in scope or cname.lower() in s_lower:
+                return cname
+        if "dukick" in s_lower: return "dukickk"
+        if "plato" in s_lower: return "platogroup"
+        if "ncthang" in s_lower: return "ncthang04"
+        if "ode" in s_lower: return "ode"
+        return "Buzz"
+
+    def normalize_timestamp(self, ts: Any) -> int:
+        if not ts:
+            return int(time.time())
+        try:
+            ts_val = int(ts)
+            # If timestamp is in milliseconds (13 digits), convert to seconds
+            if ts_val > 9999999999:
+                ts_val = ts_val // 1000
+            # Sanity check: between 2020-01-01 and 2035-01-01
+            if ts_val < 1577836800 or ts_val > 2051222400:
+                return int(time.time())
+            return ts_val
+        except Exception:
+            return int(time.time())
+
+    def is_synthetic_or_test(self, eid: str, content: str) -> bool:
+        if not eid or not content:
+            return True
+        eid_str = str(eid).lower()
+        if any(eid_str.startswith(p) for p in ("test_", "dummy_", "mock_", "voice_test_", "test-")):
+            return True
+
+        cnt = content.strip()
+        if not cnt:
+            return True
+
+        # Base64 ciphertext / bot payload blobs (e.g. As2fFbm6...)
+        if len(cnt) >= 20 and " " not in cnt and re.match(r"^[A-Za-z0-9+/=]+$", cnt):
+            return True
+
+        # Single word bot tokens
+        cnt_upper = cnt.upper()
+        if cnt_upper in ("ONE", "TWO", "THREE", "FOUR", "FIVE", "CLEAN", "READY", "MODEL-OK", "REG", "PING", "PONG", "TEST"):
+            return True
+
+        # Bot benchmark & test patterns
+        test_patterns = (
+            "channel ready", "concurrency pass", "routing verified", "verification test",
+            "calibration regression test", "concurrency test", "model-capture verification",
+            "live usage-control test", "spoof test", "gateway environment publication",
+            "acp test success", "test với timeout", "test 07:56", "trace turn test",
+            "second test message", "for this test session only", "test_repo",
+            "needs configuration before it can respond", "execution timed out",
+            "ai usage today", "test voice", "test alert", "test thông báo âm thanh"
+        )
+        cnt_lower = cnt.lower()
+        if any(pat in cnt_lower for pat in test_patterns):
+            return True
+
+        return False
+
+    def add_message(self, eid: str, kind: int, pubkey: str, content: str, chid: str, scope: str, created_at: Any, is_live: bool = False) -> bool:
+        if not eid or not content:
+            return False
+
+        content = content.strip()
+        if not content:
+            return False
+
+        if self.is_synthetic_or_test(eid, content):
+            return False
+
+        if content.startswith("{") and content.endswith("}"):
+            try:
+                obj = json.loads(content)
+                if "text" in obj: content = obj["text"]
+                elif "content" in obj: content = obj["content"]
+                elif any(k in obj for k in ("ephemeral_channel_id", "has_more", "descendant_count", "actor", "target")):
+                    return False
+            except Exception:
+                pass
+
+        comm_name = self.resolve_community(scope)
+        raw_ch_name = self.channel_names.get(chid, "")
+        sender = self.user_names.get(pubkey, f"Thành viên {pubkey[:6]}" if pubkey else "Buzz")
+
+        # Format channel name nicely
+        if raw_ch_name:
+            ch_name = raw_ch_name
+        elif chid and chid in self.dm_channels:
+            ch_name = f"DM ({self.dm_channels[chid]})"
+        elif chid:
+            ch_name = f"#{chid[:6]}"
+        else:
+            ch_name = "general"
+
+        # Explicit DM check (strictly match DM without fuzzy substring on words like admin)
+        is_dm = (raw_ch_name.upper() == "DM" or kind in (4, 1059) or ch_name.upper() == "DM" or ch_name.startswith("DM (") or ch_name.startswith("DM -"))
+        if is_dm:
+            if not ch_name.startswith("DM ("):
+                if pubkey != MY_PUBKEY and sender and not sender.startswith("Thành viên"):
+                    ch_name = f"DM ({sender})"
+                elif chid and chid in self.dm_channels:
+                    ch_name = f"DM ({self.dm_channels[chid]})"
+                else:
+                    ch_name = "DM"
+
+        is_mention = False
+        if "@" in content:
+            for uname in self.user_names.values():
+                if uname and f"@{uname}".lower() in content.lower():
+                    is_mention = True
+                    break
+
+        norm_ts = self.normalize_timestamp(created_at)
+        lt = time.localtime(norm_ts)
+
+        item = {
+            "id": eid,
+            "time": time.strftime("%H:%M · %d/%m", lt),
+            "full_time": time.strftime("%H:%M:%S · %d/%m/%Y", lt),
+            "timestamp": norm_ts,
+            "community": comm_name,
+            "channel": ch_name,
+            "channel_id": chid,
+            "sender": sender,
+            "pubkey": pubkey,
+            "is_dm": is_dm,
+            "is_mention": is_mention,
+            "content": content
+        }
+
+        with self.lock:
+            is_new = eid not in self.seen_event_ids
+            self.seen_event_ids.add(eid)
+            # If item already exists, preserve valid specific timestamp if existing is more accurate
+            if eid in self.messages:
+                existing = self.messages[eid]
+                if existing.get("timestamp") and not is_live:
+                    if norm_ts >= int(time.time()) - 5 and existing["timestamp"] < norm_ts:
+                        item["timestamp"] = existing["timestamp"]
+                        item["time"] = existing["time"]
+                        item["full_time"] = existing.get("full_time", item["full_time"])
+            self.messages[eid] = item
+
+        if is_new and is_live and pubkey != MY_PUBKEY:
+            self._notify(item)
+
+        return is_new
+
+    def _notify(self, item: Dict[str, Any]):
+        try:
+            cfg = load_sound_config()
+            if not cfg.get("enabled", True):
+                return
+
+            # 1. Voice / Audio alert
+            play_audio_alert(is_mention=item.get("is_mention", False))
+
+            # 2. Visual desktop notification
+            if not cfg.get("show_desktop_notification", True):
+                return
+
+            env = os.environ.copy()
+            env["DISPLAY"] = ":0"
+            if "WAYLAND_DISPLAY" not in env:
+                env["WAYLAND_DISPLAY"] = "wayland-0"
+            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+            env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
+
+            comm = item.get("community", "Buzz")
+            chan = item.get("channel", "general")
+            sender = item.get("sender", "Buzz")
+            cnt = item.get("content", "")[:100].replace("\n", " ")
+
+            title = f"📢 [{comm.upper()}] #{chan}"
+            body = f"👤 {sender}: {cnt}"
+            subprocess.Popen([
+                "notify-send", "-a", "Buzz", "-i", "dialog-information",
+                "-u", "critical", "-t", "6000", title, body
+            ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def sync_all(self, initial: bool = False):
+        new_count = 0
+        if os.path.exists(DB_HEAD):
+            try:
+                conn = sqlite3.connect(f"file:{DB_HEAD}?mode=ro", uri=True)
+                c = conn.cursor()
+                for scope, chid, events_str, saved_at in c.execute("SELECT scope, channel_id, events_json, saved_at FROM channel_head"):
+                    try:
+                        for ev in json.loads(events_str):
+                            k = ev.get("kind", 0)
+                            if k in (9, 40003, 4, 1, 1059) or (k == 7 and len(ev.get("content","")) < 10):
+                                ts = ev.get("created_at") or ev.get("createdAt") or ev.get("timestamp") or saved_at
+                                if self.add_message(ev.get("id"), k, ev.get("pubkey",""), ev.get("content",""), chid, scope, ts, is_live=(not initial)):
+                                    new_count += 1
+                    except Exception:
+                        pass
+                conn.close()
+            except Exception:
+                pass
+
+        if os.path.exists(DB_LOCALSTORAGE):
+            try:
+                conn = sqlite3.connect(f"file:{DB_LOCALSTORAGE}?mode=ro", uri=True)
+                c = conn.cursor()
+                for k, v in c.execute("SELECT key, value FROM ItemTable WHERE key LIKE '%thread-activity%'"):
+                    val = v.decode("utf-16le") if isinstance(v, bytes) else str(v)
+                    try:
+                        for item in json.loads(val):
+                            ts = item.get("createdAt") or item.get("created_at") or item.get("timestamp") or item.get("saved_at")
+                            if self.add_message(item.get("id"), item.get("kind", 9), item.get("pubkey",""), item.get("content",""), item.get("channelId",""), k, ts, is_live=(not initial)):
+                                new_count += 1
+                    except Exception:
+                        pass
+                conn.close()
+            except Exception:
+                pass
+
+        if os.path.exists(DB_ARCHIVE):
+            try:
+                conn = sqlite3.connect(f"file:{DB_ARCHIVE}?mode=ro", uri=True)
+                c = conn.cursor()
+                for relay_url, eid, kind, pubkey, created_at, raw_json in c.execute("SELECT relay_url, id, kind, pubkey, created_at, raw_json FROM archived_events"):
+                    try:
+                        data = json.loads(raw_json)
+                        chid = ""
+                        for t in data.get("tags", []):
+                            if t and t[0] in ("h", "e"):
+                                chid = t[1]
+                                break
+                        ts = created_at or data.get("created_at") or data.get("createdAt") or data.get("timestamp")
+                        if self.add_message(eid, kind, pubkey, data.get("content",""), chid, relay_url, ts, is_live=(not initial)):
+                            new_count += 1
+                    except Exception:
+                        pass
+                conn.close()
+            except Exception:
+                pass
+
+        self.save_to_disk()
+        return new_count
+
+    def save_to_disk(self):
+        try:
+            sorted_msgs = self.get_sorted_messages()
+            with open(LATEST_MSGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(sorted_msgs, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def get_channel_read_states(self) -> Dict[str, int]:
+        read_states: Dict[str, int] = {}
+        if os.path.exists(DB_LOCALSTORAGE):
+            try:
+                conn = sqlite3.connect(f"file:{DB_LOCALSTORAGE}?mode=ro", uri=True)
+                c = conn.cursor()
+                c.execute("SELECT value FROM ItemTable WHERE key LIKE 'buzz.channel-read-state.v2%'")
+                row = c.fetchone()
+                if row:
+                    val = row[0].decode('utf-16le') if isinstance(row[0], bytes) else str(row[0])
+                    for chid, iso_str in json.loads(val).items():
+                        try:
+                            dt = datetime.datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+                            read_states[chid] = int(dt.timestamp())
+                        except Exception:
+                            pass
+                conn.close()
+            except Exception:
+                pass
+
+        if os.path.exists(DB_UNREAD):
+            try:
+                conn_u = sqlite3.connect(f"file:{DB_UNREAD}?mode=ro", uri=True)
+                cu = conn_u.cursor()
+                cu.execute("SELECT context_id, read_at FROM read_markers")
+                for chid, r_at in cu.fetchall():
+                    if r_at and (chid not in read_states or r_at > read_states[chid]):
+                        read_states[chid] = r_at
+                conn_u.close()
+            except Exception:
+                pass
+
+        return read_states
+
+    def get_sorted_messages(self) -> List[Dict[str, Any]]:
+        read_states = self.get_channel_read_states()
+        now_ts = int(time.time())
+        with self.lock:
+            msgs = [dict(m) for m in self.messages.values()]
+
+        for m in msgs:
+            chid = m.get("channel_id")
+            ts = m.get("timestamp", 0)
+            read_ts = read_states.get(chid, 0)
+            m["is_unread"] = bool(ts > read_ts and (read_ts > 0 or ts > (now_ts - 7 * 86400)))
+
+        return sorted(msgs, key=lambda x: x["timestamp"], reverse=True)
+
+    def _worker(self):
+        loop_c = 0
+        while self.running:
+            try:
+                loop_c += 1
+                if loop_c % 30 == 0:
+                    self.load_metadata()
+                self.sync_all(initial=False)
+                time.sleep(0.3)
+            except Exception:
+                time.sleep(1.0)
+
+MSG_HUB = UnifiedMessageHub()
 
 
 # ===========================================================================
@@ -2171,10 +2665,161 @@ def v_settings() -> str:
     return ui.render_page(i18n.t("settings.title"), "/settings", body, i18n.t("settings.subtitle"), unread_alerts=unread_alerts)
 
 
+def v_messages(qs: Dict[str, List[str]]) -> str:
+    unread_alerts = get_unread_alerts_count()
+    messages = MSG_HUB.get_sorted_messages()
+
+    comm_colors = {
+        "dukickk": ("#3b82f6", "rgba(59,130,246,0.12)", "rgba(59,130,246,0.3)"),
+        "platogroup": ("#a855f7", "rgba(168,85,247,0.12)", "rgba(168,85,247,0.3)"),
+        "ode": ("#f59e0b", "rgba(245,158,11,0.12)", "rgba(245,158,11,0.3)"),
+        "ncthang04": ("#10b981", "rgba(16,185,129,0.12)", "rgba(16,185,129,0.3)"),
+    }
+
+    rows_html = []
+    for m in messages:
+        time_str = m.get("time", "")
+        comm = m.get("community", "Buzz")
+        ch = m.get("channel", "")
+        sender = m.get("sender", "")
+        cnt = m.get("content", "")
+        is_mention = m.get("is_mention", False)
+
+        color, bg, border = comm_colors.get(comm.lower(), ("#94a3b8", "rgba(148,163,184,0.12)", "rgba(148,163,184,0.3)"))
+        comm_badge = f'<span class="badge" style="background:{bg};color:{color};border:1px solid {border};font-weight:600;">{html.escape(comm.upper())}</span>'
+        mention_badge = '<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);margin-left:6px;">@Mention</span>' if is_mention else ""
+
+        rows_html.append(f"""<tr>
+          <td style="white-space:nowrap;font-size:12px;color:var(--text-muted);">{html.escape(time_str)}</td>
+          <td>{comm_badge}</td>
+          <td><b>#{html.escape(ch)}</b>{mention_badge}</td>
+          <td><span style="font-weight:600;color:var(--text-primary);">{html.escape(sender)}</span></td>
+          <td style="font-size:13px;line-height:1.4;">{html.escape(cnt)}</td>
+        </tr>""")
+
+    tbody = "".join(rows_html) if rows_html else '<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-muted);">Chưa có tin nhắn mới nào được ghi nhận. Cứ mỗi khi có tin nhắn tới từ bất kỳ nhóm/kênh nào, nội dung sẽ hiển thị ngay tại đây.</td></tr>'
+
+    stats_cards = f"""
+    <div class="metrics-grid" style="margin-bottom:24px;">
+      <div class="metric-card">
+        <div class="metric-label">Tổng tin nhắn nhận được</div>
+        <div class="metric-value">{len(messages)}</div>
+        <div class="metric-subtext">Tổng hợp từ tất cả Workspace</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Số Workspace hoạt động</div>
+        <div class="metric-value">4</div>
+        <div class="metric-subtext">dukickk, platogroup, ode, ncthang04</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Chuông báo âm thanh</div>
+        <div class="metric-value" style="color:var(--success);">BẬT 🔔</div>
+        <div class="metric-subtext">Giọng ElevenLabs tiếng Việt</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Popup thông báo màn hình</div>
+        <div class="metric-value" style="color:var(--primary);">BẬT 📢</div>
+        <div class="metric-subtext">Hiển thị tên nhóm, kênh & người gửi</div>
+      </div>
+    </div>
+    """
+
+    table_card = f"""
+    <div class="card" style="margin-top:20px;">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+          <div class="card-title">Hộp thư & Luồng hoạt động tin nhắn tập trung</div>
+          <div class="card-subtitle">Cập nhật liên tục — Biết ngay nhóm nào và kênh nào vừa có tin nhắn</div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <input type="text" id="filter-messages" placeholder="🔍 Tìm kiếm theo kênh, người gửi, nội dung..." 
+                 oninput="filterTable('filter-messages', '#messages-table')" 
+                 style="padding:8px 14px;border-radius:8px;border:1px solid var(--border-default);background:var(--bg-surface);color:var(--text-primary);font-size:13px;min-width:280px;">
+        </div>
+      </div>
+      <div class="table-wrapper">
+        <table class="data-table" id="messages-table">
+          <thead>
+            <tr>
+              <th style="width:130px;">Thời gian</th>
+              <th style="width:150px;">Nhóm / Workspace</th>
+              <th style="width:200px;">Kênh / Channel</th>
+              <th style="width:170px;">Người gửi</th>
+              <th>Nội dung tin nhắn</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tbody}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    """
+
+    body = f"{stats_cards}\n{table_card}"
+    return ui.render_page("Hộp thư & Hoạt động", "/messages", body, "Bảng theo dõi tin nhắn tập trung từ tất cả các nhóm Buzz", unread_alerts=unread_alerts)
+
+
+def generate_ai_catchup_summary() -> Dict[str, Any]:
+    msgs = MSG_HUB.get_sorted_messages()
+    unreads = [m for m in msgs if m.get("is_unread")]
+    has_unread = True
+    if not unreads:
+        unreads = msgs[:8]
+        has_unread = False
+
+    if not unreads:
+        return {
+            "has_unread": False,
+            "total_unread": 0,
+            "total_channels": 0,
+            "bulletins": []
+        }
+
+    groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for m in unreads:
+        comm = m.get("community") or "Chung"
+        chan = m.get("channel") or "general"
+        if comm not in groups:
+            groups[comm] = {}
+        if chan not in groups[comm]:
+            groups[comm][chan] = []
+        groups[comm][chan].append(m)
+
+    bulletins = []
+    for comm, ch_map in groups.items():
+        for chan, items in ch_map.items():
+            items.sort(key=lambda x: x.get("timestamp", 0))
+            senders = list(dict.fromkeys(it.get("sender", "Thành viên") for it in items))
+            senders_str = ", ".join(senders[:3])
+            latest_m = items[-1]
+            raw_cnt = latest_m.get("content", "").strip()
+            preview = raw_cnt.replace("\n", " ")
+            if len(preview) > 130:
+                preview = preview[:127] + "..."
+            bulletins.append({
+                "community": comm,
+                "channel": chan,
+                "count": len(items),
+                "senders": senders_str,
+                "latest_preview": preview,
+                "last_timestamp": latest_m.get("timestamp", 0),
+                "channel_id": latest_m.get("channel_id") or chan,
+                "is_dm": bool(latest_m.get("is_dm") or "dm" in chan.lower())
+            })
+
+    bulletins.sort(key=lambda b: (b["count"], b["last_timestamp"]), reverse=True)
+
+    return {
+        "has_unread": has_unread,
+        "total_unread": len(unreads) if has_unread else 0,
+        "total_channels": len(bulletins),
+        "bulletins": bulletins
+    }
+
 # ===========================================================================
 # HTTP Server Handler
 # ===========================================================================
-
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # keep dashboard logs free of request telemetry
@@ -2199,8 +2844,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(data)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def _redirect(self, to: str):
         self.send_response(303)
@@ -2209,6 +2864,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._bind_ctx()
+        global PENDING_NAV
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -2217,6 +2873,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, v_calibration(qs))
             elif path == "/":
                 self._send(200, v_overview())
+            elif path == "/messages":
+                self._send(200, v_messages(qs))
             elif path == "/users":
                 self._send(200, v_users(qs))
             elif path.startswith("/users/"):
@@ -2241,6 +2899,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(ledger.agent_summaries()), "application/json")
             elif path == "/api/users.json":
                 self._send(200, json.dumps(ledger.user_summaries()), "application/json")
+            elif path == "/api/latest_messages.json":
+                msgs = MSG_HUB.get_sorted_messages()
+                self._send(200, json.dumps(msgs), "application/json")
+            elif path == "/api/poll_cmd":
+                with CMD_LOCK:
+                    cmd = PENDING_CMDS.pop(0) if PENDING_CMDS else None
+                self._send(200, json.dumps(cmd or {}), "application/json")
+            elif path.startswith("/api/cmd_result/"):
+                cmd_id = path.split("/")[-1]
+                with CMD_LOCK:
+                    res = CMD_RESULTS.get(cmd_id)
+                self._send(200, json.dumps(res or {}), "application/json")
+            elif path == "/api/test_sound":
+                try:
+                    import subprocess
+                    subprocess.Popen([os.path.join(HOME, ".local/bin/buzz-sound"), "test"])
+                    self._send(200, json.dumps({"status": "ok"}), "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"status": "error", "error": str(e)}), "application/json")
+            elif path == "/api/sound_config":
+                self._send(200, json.dumps(load_sound_config()), "application/json")
+            elif path == "/api/ai_summary":
+                summary_data = generate_ai_catchup_summary()
+                self._send(200, json.dumps(summary_data, ensure_ascii=False), "application/json")
             elif path == "/health":
                 self._send(200, "ok", "text/plain")
             else:
@@ -2251,13 +2933,164 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         public = self._bind_ctx()
+        global PENDING_NAV
         path = urllib.parse.urlparse(self.path).path
         if public:
             self._send(403, "Ban xem cong khai: khong doi cai dat tu internet.", "text/plain; charset=utf-8")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+            raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else ""
+
+            if path == "/api/register_community":
+                try:
+                    data = json.loads(raw_body) if raw_body else {}
+                    comms = data.get("communities", [])
+                    added = 0
+                    for c in comms:
+                        name = c.get("name", "")
+                        r_url = c.get("relayUrl", "")
+                        cid = c.get("id", "")
+                        if r_url and name:
+                            if r_url not in MSG_HUB.communities or MSG_HUB.communities[r_url] != name:
+                                MSG_HUB.communities[r_url] = name
+                                added += 1
+                        if cid and name:
+                            if cid not in MSG_HUB.communities or MSG_HUB.communities[cid] != name:
+                                MSG_HUB.communities[cid] = name
+                                added += 1
+                    if added > 0:
+                        MSG_HUB.sync_all(initial=False)
+                        MSG_HUB.save_to_disk()
+                    self._send(200, json.dumps({"status": "ok", "added": added, "total": len(MSG_HUB.communities)}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/ai_summary":
+                try:
+                    summary_data = generate_ai_catchup_summary()
+                    self._send(200, json.dumps(summary_data, ensure_ascii=False), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/sync_now":
+                new_c = MSG_HUB.sync_all(initial=False)
+                self._send(200, json.dumps({"status": "synced", "new_messages": new_c, "total": len(MSG_HUB.messages)}), "application/json")
+                return
+            elif path == "/api/mark_read":
+                try:
+                    data = json.loads(raw_body) if raw_body else {}
+                    target_chid = data.get("channel_id")
+                    now_ts = int(time.time())
+                    if os.path.exists(DB_UNREAD):
+                        conn = sqlite3.connect(DB_UNREAD)
+                        c = conn.cursor()
+                        if target_chid:
+                            c.execute("INSERT OR REPLACE INTO read_markers (scope, context_id, read_at) VALUES ('manual', ?, ?)", (target_chid, now_ts))
+                        else:
+                            for m in MSG_HUB.messages.values():
+                                cid = m.get("channel_id")
+                                if cid:
+                                    c.execute("INSERT OR REPLACE INTO read_markers (scope, context_id, read_at) VALUES ('manual', ?, ?)", (cid, now_ts))
+                        conn.commit()
+                        conn.close()
+                    MSG_HUB.save_to_disk()
+                    self._send(200, json.dumps({"status": "ok", "marked_at": now_ts}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/play_sound":
+                try:
+                    data = json.loads(raw_body) if raw_body else {}
+                    is_mention = data.get("is_mention", False)
+                    snd = data.get("sound")
+                    play_audio_alert(is_mention=is_mention, custom_sound=snd)
+                    self._send(200, json.dumps({"status": "ok", "played": True}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/ingest_event":
+                try:
+                    data = json.loads(raw_body)
+                    ev = data.get("event", {})
+                    scope = data.get("scope") or data.get("relayUrl") or data.get("community") or ""
+                    chid = data.get("channelId") or data.get("channel") or ""
+                    if ev and ev.get("id"):
+                        for t in ev.get("tags", []):
+                            if t and t[0] in ("h", "e") and not chid:
+                                chid = t[1]
+                        k = ev.get("kind", 9)
+                        pubk = ev.get("pubkey", "")
+                        cnt = ev.get("content", "")
+                        c_at = ev.get("created_at") or ev.get("createdAt") or ev.get("timestamp") or int(time.time())
+                        is_live = not data.get("silent", False)
+                        is_new = MSG_HUB.add_message(ev["id"], k, pubk, cnt, chid, scope, c_at, is_live=is_live)
+                        if is_new:
+                            MSG_HUB.save_to_disk()
+                        self._send(200, json.dumps({"status": "ok", "is_new": is_new}), "application/json")
+                    else:
+                        self._send(400, json.dumps({"status": "invalid_event"}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/nav_exec":
+                try:
+                    data = json.loads(raw_body)
+                    comm = (data.get("community") or "").lower().strip()
+                    chan = (data.get("channel") or "").strip()
+                    snd = (data.get("sender") or "").strip()
+                    PENDING_NAV = {"community": comm, "channel": chan, "sender": snd}
+                    print(f"[NAV_EXEC_DOM_REQUEST] Workspace: {comm}, Channel: {chan}, Sender: {snd}", flush=True)
+                    self._send(200, json.dumps({"status": "navigating", "community": comm, "channel": chan}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/pending_nav":
+                try:
+                    data = json.loads(raw_body)
+                    PENDING_NAV = data
+                    print(f"[PENDING_NAV_QUEUED] {data}", flush=True)
+                    self._send(200, json.dumps({"status": "queued", "data": data}), "application/json")
+                except Exception as ex:
+                    self._send(400, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/log":
+                try:
+                    data = json.loads(raw_body)
+                    print(f"[BUZZ_DOM_LOG] {data}", flush=True)
+                    log_dir = os.path.join(APP_DATA_DIR, "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    with open(os.path.join(log_dir, "dom_debug.log"), "a", encoding="utf-8") as f:
+                        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {json.dumps(data, ensure_ascii=False)}\n")
+                except Exception as ex:
+                    print(f"[BUZZ_DOM_LOG] Raw: {raw_body[:200]} err={ex}", flush=True)
+                self._send(200, json.dumps({"status": "ok"}), "application/json")
+                return
+            elif path in ("/api/exec_js", "/api/rpc"):
+                try:
+                    data = json.loads(raw_body)
+                    cmd_id = f"cmd_{int(time.time()*1000)}"
+                    cmd_obj = dict(data)
+                    cmd_obj["id"] = cmd_id
+                    with CMD_LOCK:
+                        PENDING_CMDS.append(cmd_obj)
+                    self._send(200, json.dumps({"status": "queued", "cmd_id": cmd_id}), "application/json")
+                except Exception as ex:
+                    self._send(400, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/cmd_result":
+                try:
+                    data = json.loads(raw_body)
+                    cmd_id = data.get("id")
+                    if cmd_id:
+                        with CMD_LOCK:
+                            CMD_RESULTS[cmd_id] = data
+                    self._send(200, json.dumps({"status": "ok"}), "application/json")
+                except Exception as ex:
+                    self._send(400, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+
+            form = urllib.parse.parse_qs(raw_body)
             parts = path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "users" and parts[2] == "set-profile":
                 pubkey = urllib.parse.unquote(parts[1])

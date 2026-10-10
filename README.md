@@ -1,116 +1,166 @@
-# ⚡ AI Usage Center — Buzz AI Infrastructure (v2.1 Enterprise)
+# ⚡ Buzz Desktop Ecosystem & AI Usage Center (Enterprise Suite)
 
 [![Status](https://img.shields.io/badge/status-active%20%2F%20live-success.svg)](#)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](#)
-[![Theme](https://img.shields.io/badge/UI%2FUX-Obsidian%20Dark%20%26%20Light-8b5cf6.svg)](#)
+[![Theme](https://img.shields.io/badge/UI%2FUX-Raycast%20%26%20Obsidian%20Glass-8b5cf6.svg)](#)
 [![Language](https://img.shields.io/badge/locale-vi--VN%20100%25-orange.svg)](#)
 [![Zero-Dependency](https://img.shields.io/badge/frontend-zero%20dependencies-10b981.svg)](#)
 
-> **Trung tâm Giám sát & Phân bổ Tài nguyên AI (AI Usage Center)** dành cho hệ sinh thái Buzz đa tác tử (Claude CLI + 4 Cổng Google AGY). Được thiết kế theo chuẩn Enterprise SaaS cao cấp (Linear / Stripe / Vercel / Raycast), bản địa hóa 100% tiếng Việt tự nhiên và tối ưu hóa tối đa hiệu năng với frontend không phụ thuộc thư viện ngoài (Zero-JS/CSS dependencies).
+> **Hệ sinh thái mở rộng toàn diện cho Buzz Desktop (Linux/WebKit2GTK)** kết hợp **Trung tâm Giám sát Tài nguyên AI (AI Usage Center)**. Được thiết kế theo nguyên tắc phi xâm lấn (Non-invasive LD_PRELOAD), chuẩn hóa giao diện phong cách Raycast / Linear / Obsidian Glassmorphic, bản địa hóa 100% tiếng Việt tự nhiên và hỗ trợ triển khai 1 lệnh duy nhất trên mọi máy tính Linux.
 
 ---
 
-## 📸 Giao diện Doanh nghiệp (Enterprise UI/UX)
+## 🚀 Cài đặt Nhanh 1 Lệnh (Turnkey 1-Command Quickstart)
 
-| Tổng quan Hệ thống (Overview) | Danh sách Người dùng (Users & Search) |
-| :---: | :---: |
-| ![Tổng quan](screenshots/overview_1920x1080.png) | ![Người dùng](screenshots/users_1920x1080.png) |
+Dành cho bất kỳ máy tính nào đã cài ứng dụng **Buzz Desktop**:
 
-| Giám sát Agent & Cổng kết nối (Agents) | Phân tích Hiệu chuẩn & Sandbox (Calibration) |
-| :---: | :---: |
-| ![Agent](screenshots/agents_1920x1080.png) | ![Hiệu chuẩn](screenshots/calibration_1920x1080.png) |
+```bash
+# 1. Clone repository về máy
+git clone https://github.com/thangngny/buzz-ai-usage-center.git
+cd buzz-ai-usage-center
 
----
+# 2. Chạy script cài đặt tự động (không cần quyền root/sudo)
+./install.sh
+```
 
-## ✨ Tính năng Nổi bật (Key Features)
+Script `install.sh` sẽ tự động thực hiện:
+1. Kiểm tra môi trường (Python 3, PulseAudio/PipeWire).
+2. Tạo các thư mục cấu hình và cache trong `$HOME/.local/share/xyz.block.buzz.app`.
+3. Biên dịch thư viện Injector `libbuzz_enhancer.so` từ mã nguồn C (sử dụng dynamic `$HOME`).
+4. Thiết lập launcher wrapper `buzz-desktop` phi xâm lấn qua cơ chế `LD_PRELOAD`.
+5. Cài đặt các file âm thanh (`sounds/`), kịch bản giao diện (`buzz_ui_enhancer.js`), daemon thông báo WebSocket (`buzz_sound_notifier.py`) và công cụ CLI `buzz-sound`.
+6. Tự động cấu hình và kích hoạt 2 dịch vụ nền: `buzz-usage-dashboard.service` và `buzz-sound-notifier.service`.
 
-### 1. 🎨 Thiết kế Obsidian Dark Mode & Bộ chuyển đổi Sáng/Tối (Theme Switcher)
-- **Giao diện Tối Obsidian:** Sử dụng bảng màu tối sâu (`#090a10`, `#111420`, `#161a29`) kết hợp ánh sáng radial ambient mờ và thẻ kính mờ (`backdrop-filter: blur(16px)`).
-- **Chuyển đổi Sáng ☀️ / Tối 🌙:** Chuyển đổi theme tức thì không tải lại trang và tự động lưu tùy chọn vào `localStorage`.
-
-### 2. 📊 Trực quan hóa Dữ liệu SVG Mượt mà (Advanced SVG Visualizations)
-- **Đường cong Bezier mượt mà (Cubic Bezier Curve):** Biểu đồ xu hướng sử dụng 7 ngày được vẽ bằng thuật toán Bezier cubic mượt mà, dải màu gradient mờ và hiệu ứng phát sáng neon.
-- **Đồng hồ tròn Radial Gauge:** Vòng tròn tiến độ mini cho từng tài khoản AGY và hạn mức cơ sở.
-
-### 3. 🔍 Bộ công cụ tương tác thông minh (Client-side Power Tools)
-- **Tìm kiếm tức thì (Live Search):** Lọc người dùng theo tên hoặc PubKey theo thời gian thực (real-time keypress) không cần reload.
-- **Sắp xếp cột bảng dữ liệu (Sortable Columns):** Nhấp tiêu đề cột để sắp xếp tăng/giảm theo % sử dụng, token, số request.
-- **Sao chép 1-Click kèm Toast:** Copy mọi PubKey, Request ID, lệnh hệ thống kèm thông báo nổi *"✓ Đã sao chép"*.
-- **Tự động làm mới (Auto-Refresh):** Tùy chọn 15s / 30s / 60s kèm vòng tròn SVG đếm ngược chuyển động liên tục.
-- **Trình mô phỏng Chính sách Sandbox:** Kéo thanh trượt (500K – 10M) để tính toán ngay mức độ tác động hạn ngạch lên người dùng.
-
-### 4. 🛡️ Phân định rõ ràng Dung lượng AGY vs Hạn mức Người dùng
-- **Hạn mức người dùng (User Allowance):** Hiển thị thanh tiến trình 4 màu (Xanh lá $\rightarrow$ Vàng $\rightarrow$ Cam $\rightarrow$ Đỏ) thể hiện % đã dùng.
-- **Dung lượng tài khoản AGY (Provider Capacity):** Thể hiện bằng tông màu tím Neon chuyên biệt (`#a855f7`) kèm đồng hồ radial gauge thể hiện % còn lại.
+> **Khởi chạy ứng dụng:** Chỉ cần mở ứng dụng Buzz Desktop bình thường hoặc gõ `buzz-desktop` trong Terminal.
 
 ---
 
-## 🏛️ Kiến trúc Hệ thống (Architecture)
+## ✨ Các Tính Năng Nâng Cấp Nổi Bật (Key Features)
+
+### 1. ⚡ Hộp Thư Nhanh Đa Nhóm (Glassmorphic Message Hub Drawer)
+- **Phím tắt toàn cục:** Bấm **`Alt + M`** (hoặc click nút viên thuốc ở góc phải dưới / nút icon ⚡ trên thanh Rail) để mở ngay Hộp thư tin nhắn từ tất cả các nhóm & kênh.
+- **Mặc định sạch sẽ (`🔴 Chưa xem`):** Chỉ hiển thị các tin nhắn mới chưa đọc, không gây rối mắt với số tổng 900+ tin lịch sử. Khi đã đọc hết sẽ hiện màn hình thông báo hoàn tất chúc mừng.
+- **Tìm kiếm tức thì (`/`):** Tìm kiếm siêu tốc người gửi, nội dung tin nhắn, kênh, thư mục dự án với độ trễ 0ms.
+- **Lọc theo loại tin:** Lọc nhanh theo *Tất cả*, *Kênh chat*, *Dự án & Thư mục*, *Tin riêng (DM)*, *Diễn đàn*.
+- **Chuyển nhóm 1-9:** Bấm phím số `1` đến `9` để đổi nhanh bộ lọc giữa các Workspace (`dukickk`, `platogroup`, `ncthang04`, `ode`, `phamgianam`, `phuongstory`).
+
+### 2. ⚡ AI Catch-Up TL;DR (Tóm Tắt Nhanh Tin Tồn Đọng)
+- Bấm nút **`⚡ Tóm tắt AI`** trong Hộp thư hoặc nhấn **`Alt + S`**.
+- Backend tự động gom các tin chưa đọc theo từng Cộng đồng & Kênh, liệt kê những ai vừa nhắn và trích xuất nội dung ngắn gọn giúp nắm bắt diễn biến trong 3 giây.
+- Bấm vào bất kỳ thẻ tóm tắt nào để nhảy ngay đến đúng tin nhắn đó trong kênh.
+
+### 3. 💬 Quick Reply & Action Chips (Trả Lời Nhanh 1 Chạm)
+- Trực tiếp trên mỗi thẻ tin nhắn trong Drawer, bấm **`💬 Trả lời nhanh`** để mở ô phản hồi tức thì.
+- Trang bị sẵn các chip hành động thông dụng:
+  - `👍 OK`
+  - `✅ Đã duyệt`
+  - `🔄 Tiếp tục đi`
+  - `⏳ Chờ chút nhé`
+- Bấm vào chip hoặc nhập nội dung rồi bấm **Enter**, hệ thống tự động mở kênh và điền sẵn câu trả lời vào khung chat.
+
+### 4. 🔔 Thông Báo Âm Thanh & Visual Real-Time Cho TẤT CẢ Tin Nhắn
+- Notifier kết nối song song thời gian thực tới toàn bộ các Relay cộng đồng qua WebSocket Nostr NIP-42.
+- **Mọi tin nhắn mới:** Đều kích hoạt âm báo `sound_message` và hiển thị thẻ thông báo nổi (In-app Toast) ở góc phải màn hình.
+- **Tin nhắn riêng hoặc Mention (`@ncthang`...):** Phát âm báo VIP chuông ngân `sound_mention`.
+- Tự động lọc sạch bot payloads, tin benchmark và tin nhắn do chính bạn gửi.
+
+### 5. 👁️ Active Viewport Auto-Read (Tự Động Đọc Thông Minh)
+- Theo dõi kênh thực tế đang hiển thị trên màn hình qua LocalStorage WebKit.
+- Khi bạn dừng lại xem một kênh trên **2.2 giây**, hệ thống tự động ghi nhận bạn đã xem và xóa số đếm chưa đọc trên thanh tiện ích mà không cần bấm nút thủ công.
+
+### 6. 🎯 Message Ping & Spotlight Aura (Định Vị Tin Nhắn Chính Xác)
+- Khi bấm vào tin nhắn từ Drawer, hệ thống tự động chuyển Workspace, mở thư mục Accordion cha, nhấp vào kênh con, cuộn mượt đến đúng vị trí tin nhắn và làm nổi bật với:
+  - Viền phát sáng nhịp thở Amber Neon (`buzz-spotlight-active`).
+  - Huy hiệu tiêu điểm nổi `🎯 TIN NHẮN ĐÃ CHỌN`.
+  - Mũi tên chỉ điểm động `👉`.
+  - Bôi màu text dạ quang (`<mark class="buzz-ping-text-mark">`).
+
+---
+
+## 🏛️ Kiến Trúc Hệ Thống (Architecture)
 
 ```mermaid
 flowchart TD
-    subgraph UI_Layer["Giao diện v2.1 Enterprise (Zero-Dependency)"]
-        OV["Tổng quan (/)"]
-        US["Người dùng (/users & /users/:id)"]
-        AG["Hệ thống Agent (/agents)"]
-        CL["Hiệu chuẩn & Sandbox (/calibration)"]
-        AL["Cảnh báo (/alerts)"]
-        ST["Cài đặt & Sẵn sàng (/settings)"]
+    subgraph Client ["🖥️ Client Layer (WebKit2GTK / Buzz Desktop)"]
+        UI["Buzz Desktop GUI"]
+        SO["libbuzz_enhancer.so (LD_PRELOAD)"]
+        JS["buzz_ui_enhancer.js (Preload Script)"]
+        DOM["DOM + React Event Handlers"]
+        Drawer["Message Hub Drawer (Alt+M / Alt+S)"]
+        Pill["Draggable Capsule + Rail Button"]
     end
 
-    subgraph Core_Engine["Lớp Trung gian & Bản địa hóa"]
-        I18N["lib/i18n.py (Định dạng vi-VN, ICT, Từ điển ngữ nghĩa)"]
-        COMP["lib/ui_components.py (Design System: SVG Curves, Radial Gauges, Theme)"]
-        LOC["locales/vi.json (150+ Cặp khóa-giá trị chuẩn hóa)"]
+    subgraph Backend ["⚙️ Local Backend (127.0.0.1:8787)"]
+        Dash["dashboard.py (HTTP + Sync Daemon)"]
+        MsgHub["UnifiedMessageHub (Multi-Relay Cache)"]
+        AI_TLDR["AI Catch-Up TL;DR Engine (/api/ai_summary)"]
+        Audio["Audio Alert Engine (paplay / pw-play)"]
+        RPC["RPC Bridge (/api/rpc & /api/poll_cmd)"]
     end
 
-    subgraph Backend_Services["Hạ tầng Backend & Đo lường Bất biến"]
-        DB[("usage.db (SQLite WAL)")]
-        POL["bin/capacity_poller.py (Quét hạn ngạch AGY 600s)"]
-        DASH["bin/dashboard.py (HTTP Server 127.0.0.1:8787)"]
+    subgraph Notifier ["📡 Real-Time WebSocket Daemon"]
+        WS_Daemon["buzz_sound_notifier.py"]
+        WS_Relays["6x Community Nostr Relays (WebSocket)"]
     end
 
-    UI_Layer --> COMP
-    COMP --> I18N
-    I18N --> LOC
-    UI_Layer --> Backend_Services
+    UI --> SO
+    SO --> JS
+    JS --> DOM
+    JS --> Drawer
+    JS --> Pill
+    JS -- "Fetch / Sync / AI Summary / RPC" --> Dash
+    WS_Daemon <--> WS_Relays
+    WS_Daemon -- "Push Events & Audio" --> Dash
+    Dash --> Audio
+    Dash --> AI_TLDR
 ```
 
 ---
 
-## 🚀 Hướng dẫn Cài đặt & Chạy (Quickstart)
+## ⌨️ Bảng Phím Tắt Tiện Dụng (Keyboard Shortcuts)
 
-### 1. Khởi chạy Dashboard cục bộ
+| Phím tắt | Chức năng |
+| :--- | :--- |
+| <kbd>Alt</kbd> + <kbd>M</kbd> | Bật / tắt Hộp thư nhanh đa nhóm (Message Hub Drawer) |
+| <kbd>Alt</kbd> + <kbd>S</kbd> | Tạo và hiển thị Tóm tắt AI tức thì (AI Catch-Up TL;DR) |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Di chuyển chọn tin nhắn trong danh sách |
+| <kbd>Enter</kbd> | Mở trực tiếp chuyên mục / kênh / tin nhắn đang chọn |
+| <kbd>1</kbd> – <kbd>9</kbd> | Chuyển nhanh bộ lọc giữa các Workspace |
+| <kbd>/</kbd> | Focus tức thì vào ô tìm kiếm tin nhắn |
+| <kbd>Esc</kbd> | Đóng nhanh Drawer hoặc xóa hiệu ứng làm nổi bật tin nhắn |
+
+---
+
+## 🔊 Quản Trị Âm Thanh Bằng CLI (`buzz-sound`)
+
 ```bash
-# Chạy trực tiếp qua Python chuẩn (không cần cài thêm pip packages)
-python3 bin/dashboard.py
-```
-Mở trình duyệt tại: `http://127.0.0.1:8787`
+# Kiểm tra trạng thái âm thanh và service
+buzz-sound status
 
-### 2. Chạy dưới dạng dịch vụ Systemd (User Service)
+# Phát thử âm thanh mặc định
+buzz-sound test
+
+# Phát thử giọng đọc hoặc chuông dễ thương
+buzz-sound test elevenlabs
+buzz-sound set-sound thang-cute
+
+# Xem lịch sử 20 tin nhắn gần nhất kèm người gửi & thời gian
+buzz-sound history
+```
+
+---
+
+## 🔄 Gỡ Bỏ Cài Đặt (Uninstall)
+
+Nếu muốn khôi phục Buzz Desktop về trạng thái nguyên bản:
+
 ```bash
-# Kích hoạt và khởi động Dashboard
-systemctl --user enable --now buzz-usage-dashboard.service
-
-# Kích hoạt tiến trình quét dung lượng AGY
-systemctl --user enable --now buzz-usage-capacity.service
+./uninstall.sh
 ```
 
 ---
 
-## 🔒 Cam kết An toàn & Chế độ Vận hành
+## 📄 Bản Quyền & Tác Giả
 
-| Tham số / Cơ chế | Cấu hình | Ý nghĩa |
-| :--- | :--- | :--- |
-| `METER_ONLY` | **BẬT (1)** | Đo lường và ghi nhận toàn bộ lưu lượng |
-| `WARN_ONLY` | **BẬT (1)** | Gửi cảnh báo sớm khi chạm ngưỡng 70% |
-| `SOFT_LIMIT` | **TẮT (0)** | Không can thiệp độ trễ hay băng thông |
-| `HARD_LIMIT` | **TẮT (0)** | Tuyệt đối không chặn bất kỳ truy vấn nào |
-| `base_units_daily` | **3.000.000** | Hạn mức cơ sở phân bổ mặc định |
-| `Múi giờ` | **ICT (UTC+7)** | Chu kỳ làm mới vào đúng 00:00 hàng ngày |
-
----
-
-## 📄 Bản quyền & Tác giả
 Phát triển cho **Buzz AI Ecosystem** bởi **NcThang** (`thangngny`).  
 Bảo lưu mọi quyền © 2026.

@@ -1,0 +1,18 @@
+[Unit]
+Description=Buzz Desktop Real-Time Multi-Relay Sound & Visual Notifier
+After=graphical-session.target sound.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/xyz.block.buzz.app/buzz_sound_notifier.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=PULSE_SERVER=unix:/run/user/%U/pulse/native
+
+[Install]
+WantedBy=default.target

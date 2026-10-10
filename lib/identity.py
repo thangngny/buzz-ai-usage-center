@@ -71,21 +71,35 @@ def parse_candidates(prompt: str) -> Dict[str, Any]:
     m_ch = _CHANNEL_CTX.search(ctx)
     if m_ch:
         channel = m_ch.group(1)
+    
+    reply_to: Optional[str] = None
     m_rp = _REPLY_TO_CTX.search(ctx)
     if m_rp:
-        trigger = m_rp.group(1)
+        reply_to = m_rp.group(1)
 
-    # Diagnostic fallback (NOT trusted): if the context block has no
-    # --reply-to (older formats), take the Event ID of the FIRST buzz-event
-    # block — parsed only from the block header region (before its Content:
-    # line) so injected text inside Content cannot poison it.
-    if not trigger:
-        for blk in _EVENT_BLOCK.finditer(prompt):
-            body = blk.group(1)
-            m_id = _EVENT_ID_LINE.search(body)
-            if m_id:
-                trigger = m_id.group(1)
-                break
+    # Strip historical context (thread-context and conversation-context) so
+    # past turns delivered as context are not mistaken for the triggering event.
+    non_history = re.sub(
+        r"<(?:thread|conversation)-context\b[^>]*>.*?</(?:thread|conversation)-context>",
+        "",
+        prompt,
+        flags=re.DOTALL
+    )
+
+    event_ids = []
+    for blk in _EVENT_BLOCK.finditer(non_history):
+        body = blk.group(1)
+        content_pos = body.find("Content:")
+        header = body[:content_pos] if content_pos != -1 else body
+        m_id = _EVENT_ID_LINE.search(header)
+        if m_id:
+            event_ids.append(m_id.group(1))
+
+    if event_ids:
+        # The triggering event is the last buzz-event outside historical context
+        trigger = event_ids[-1]
+    elif reply_to:
+        trigger = reply_to
 
     display_name: Optional[str] = None
     m_fr = _FROM_LINE.search(prompt)
@@ -95,6 +109,7 @@ def parse_candidates(prompt: str) -> Dict[str, Any]:
     return {
         "trigger_event_id": trigger,
         "channel_id": channel,
+        "reply_to_id": reply_to,
         "display_name": display_name,
         "context_present": bool(ctx),
     }
@@ -159,6 +174,16 @@ def verify_turn(prompt: str, env: Dict[str, str],
 
     ev = next((e for e in events if e.get("id", "").lower() == trigger.lower()),
               None)
+    if ev is None and channel in _cache:
+        # Cache may be stale from an earlier turn; invalidate and re-fetch once
+        del _cache[channel]
+        try:
+            events = _fetch_channel_messages(channel, since, env)
+            ev = next((e for e in events if e.get("id", "").lower() == trigger.lower()),
+                      None)
+        except Exception:
+            pass
+
     if ev is None:
         return {"ok": False,
                 "error": f"trigger event {trigger[:12]}… not found in channel "
@@ -192,6 +217,7 @@ def verify_turn(prompt: str, env: Dict[str, str],
         "ok": True,
         "trigger_event_id": trigger.lower(),
         "channel_id": h_tag or channel,
+        "reply_to_id": cands.get("reply_to_id"),
         "sender_pubkey": str(sender).lower(),
         "display_name": cands["display_name"],   # cosmetic hint only
         "created_at": created_at,

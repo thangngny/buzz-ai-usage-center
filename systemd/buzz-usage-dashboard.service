@@ -1,0 +1,13 @@
+[Unit]
+Description=Buzz AI Usage Center & Unified Message Hub (127.0.0.1:8787)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/xyz.block.buzz.app/agents/usage-control/bin/dashboard.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

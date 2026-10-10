@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Non-invasive launcher wrapper for Buzz Desktop with UI Enhancer
+PRELOAD_LIB="$HOME/.local/lib/libbuzz_enhancer.so"
+REAL_BIN="$HOME/.local/bin/buzz-desktop-bin"
+
+if [ -f "$PRELOAD_LIB" ]; then
+    export LD_PRELOAD="$PRELOAD_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+if [ -x "$REAL_BIN" ]; then
+    exec "$REAL_BIN" "$@"
+else
+    echo "[ERROR] Real binary $REAL_BIN not found!" >&2
+    exit 1
+fi
