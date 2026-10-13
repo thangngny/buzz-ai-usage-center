@@ -1179,6 +1179,37 @@
         100% { box-shadow: 0 0 6px rgba(245, 158, 11, 0.4); }
       }
 
+      /* Sound Toggle Buttons */
+      .buzz-pill-sound-btn {
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+        border-radius: 6px !important;
+        padding: 1px 5px !important;
+        font-size: 11.5px !important;
+        line-height: 1 !important;
+        cursor: pointer !important;
+        transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        color: #f4f4f5 !important;
+      }
+      .buzz-pill-sound-btn:hover {
+        background: rgba(255, 255, 255, 0.18) !important;
+        border-color: rgba(56, 189, 248, 0.7) !important;
+        transform: scale(1.1) !important;
+      }
+      .buzz-pill-sound-btn.is-muted {
+        border-color: rgba(239, 68, 68, 0.5) !important;
+        color: #f87171 !important;
+        background: rgba(239, 68, 68, 0.15) !important;
+      }
+      .buzz-hdr-btn.is-muted {
+        background: rgba(239, 68, 68, 0.15) !important;
+        color: #f87171 !important;
+        border-color: rgba(239, 68, 68, 0.35) !important;
+      }
+
       /* --- Linear-Style Toast Notifications --- */
       #buzz-inapp-toast-container {
         position: fixed !important;
@@ -1975,8 +2006,19 @@
       <span class="buzz-status-dot"></span>
       <span id="buzz-hub-pill-label">⚡ Hộp thư đa nhóm</span>
       <span id="buzz-hub-pill-badge" class="buzz-unread-badge" style="display:none;">0</span>
+      <button id="buzz-pill-sound-btn" class="buzz-pill-sound-btn" title="Bật/Tắt âm thanh thông báo [Alt+U]">🔊</button>
       <span class="buzz-kbd-badge">Alt+M</span>
     `;
+
+    const soundBtn = pill.querySelector("#buzz-pill-sound-btn");
+    if (soundBtn) {
+      soundBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+      soundBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        toggleSoundNotification();
+      });
+    }
     
     makeDraggable(pill, "buzz_pill_pos_v1");
     (document.documentElement || document.body).appendChild(pill);
@@ -1995,14 +2037,71 @@
   }
 
   let notificationsEnabled = true;
+
+  function updateSoundButtonsUI(enabled) {
+    const pillBtn = document.getElementById("buzz-pill-sound-btn");
+    if (pillBtn) {
+      if (enabled) {
+        pillBtn.innerHTML = "🔊";
+        pillBtn.title = "Âm thanh thông báo: ĐANG BẬT [Alt+U] (Bấm để tắt)";
+        pillBtn.classList.remove("is-muted");
+      } else {
+        pillBtn.innerHTML = "🔇";
+        pillBtn.title = "Âm thanh thông báo: ĐÃ TẮT [Alt+U] (Bấm để bật)";
+        pillBtn.classList.add("is-muted");
+      }
+    }
+
+    const drawerBtn = document.getElementById("buzz-btn-toggle-sound");
+    if (drawerBtn) {
+      if (enabled) {
+        drawerBtn.innerHTML = "🔊 Chuông: Bật";
+        drawerBtn.title = "Âm thanh thông báo: ĐANG BẬT [Alt+U] (Bấm để tắt)";
+        drawerBtn.classList.remove("is-muted");
+      } else {
+        drawerBtn.innerHTML = "🔇 Chuông: Tắt";
+        drawerBtn.title = "Âm thanh thông báo: ĐÃ TẮT [Alt+U] (Bấm để bật)";
+        drawerBtn.classList.add("is-muted");
+      }
+    }
+  }
+
   async function checkNotificationConfig() {
     try {
       const res = await fetch("http://127.0.0.1:8787/api/sound_config");
       if (res.ok) {
         const cfg = await res.json();
         notificationsEnabled = (cfg.enabled !== false && cfg.show_desktop_notification !== false);
+        updateSoundButtonsUI(notificationsEnabled);
       }
     } catch(e) {}
+  }
+
+  async function toggleSoundNotification() {
+    try {
+      const res = await fetch("http://127.0.0.1:8787/api/toggle_sound", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        notificationsEnabled = !!data.enabled;
+        updateSoundButtonsUI(notificationsEnabled);
+        if (notificationsEnabled) {
+          showQuickBanner("🔔 Đã BẬT âm thanh thông báo");
+          fetch("http://127.0.0.1:8787/api/play_sound", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ is_mention: false })
+          }).catch(() => {});
+        } else {
+          showQuickBanner("🔇 Đã TẮT âm thanh thông báo");
+        }
+        return;
+      }
+    } catch(e) {}
+
+    // Fallback toggle
+    notificationsEnabled = !notificationsEnabled;
+    updateSoundButtonsUI(notificationsEnabled);
+    showQuickBanner(notificationsEnabled ? "🔔 Đã BẬT âm thanh (Local)" : "🔇 Đã TẮT âm thanh (Local)");
   }
 
   function showInAppToast(msg) {
@@ -2088,6 +2187,7 @@
           <span id="buzz-drawer-total-count" class="buzz-filter-badge" style="background:#ef4444;color:#ffffff;">0</span>
         </div>
         <div class="buzz-drawer-actions">
+          <button id="buzz-btn-toggle-sound" class="buzz-hdr-btn" title="Bật/Tắt âm thanh thông báo [Alt+U]">🔊 Chuông</button>
           <button id="buzz-btn-ai-summary" class="buzz-hdr-btn" title="⚡ Tóm tắt nhanh tin mới bằng AI [Alt+S]" style="background:rgba(168,85,247,0.18);color:#c084fc;border-color:rgba(168,85,247,0.4);">⚡ Tóm tắt AI</button>
           <button id="buzz-btn-toggle-unread" class="buzz-hdr-btn active" title="Đang chỉ hiện tin chưa xem (Bấm để xem tất cả lịch sử)">🔴 Chưa xem</button>
           <button id="buzz-btn-mark-read" class="buzz-hdr-btn" title="Đánh dấu tất cả là đã đọc">✓ Đã đọc</button>
@@ -2120,6 +2220,7 @@
           <span><kbd class="buzz-kbd-badge">↑</kbd><kbd class="buzz-kbd-badge">↓</kbd> Chọn</span>
           <span><kbd class="buzz-kbd-badge">↵</kbd> Vào mục</span>
           <span><kbd class="buzz-kbd-badge">Alt+S</kbd> Tóm tắt AI</span>
+          <span><kbd class="buzz-kbd-badge">Alt+U</kbd> Chuông</span>
           <span><kbd class="buzz-kbd-badge">1-9</kbd> Đổi nhóm</span>
           <span><kbd class="buzz-kbd-badge">Esc</kbd> Đóng</span>
         </div>
@@ -2132,6 +2233,12 @@
     // Wire Event Listeners
     document.getElementById("buzz-drawer-close-btn").addEventListener("click", closeDrawer);
     document.getElementById("buzz-btn-sync").addEventListener("click", syncAndReload);
+
+    const soundToggleBtn = document.getElementById("buzz-btn-toggle-sound");
+    if (soundToggleBtn) {
+      soundToggleBtn.addEventListener("click", toggleSoundNotification);
+    }
+    updateSoundButtonsUI(notificationsEnabled);
 
     const summaryBtn = document.getElementById("buzz-btn-ai-summary");
     if (summaryBtn) {
@@ -2803,6 +2910,13 @@
       if ((e.altKey && (e.key === "m" || e.key === "M")) || (e.ctrlKey && e.shiftKey && (e.key === "m" || e.key === "M"))) {
         e.preventDefault();
         toggleDrawer();
+        return;
+      }
+
+      // Global Toggle Sound: Alt+U
+      if (e.altKey && (e.key === "u" || e.key === "U")) {
+        e.preventDefault();
+        toggleSoundNotification();
         return;
       }
 

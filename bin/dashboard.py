@@ -2706,6 +2706,12 @@ def v_messages(qs: Dict[str, List[str]]) -> str:
 
     tbody = "".join(rows_html) if rows_html else '<tr><td colspan="5" style="text-align:center;padding:36px;color:var(--text-muted);">Chưa có tin nhắn mới nào được ghi nhận. Cứ mỗi khi có tin nhắn tới từ bất kỳ nhóm/kênh nào, nội dung sẽ hiển thị ngay tại đây.</td></tr>'
 
+    cfg = load_sound_config()
+    is_snd_enabled = cfg.get("enabled", True)
+    snd_status_text = "BẬT 🔔" if is_snd_enabled else "TẮT 🔇"
+    snd_status_color = "var(--success)" if is_snd_enabled else "var(--danger)"
+    snd_toggle_label = "🔇 Tắt chuông" if is_snd_enabled else "🔊 Bật chuông"
+
     stats_cards = f"""
     <div class="metrics-grid" style="margin-bottom:24px;">
       <div class="metric-card">
@@ -2720,7 +2726,7 @@ def v_messages(qs: Dict[str, List[str]]) -> str:
       </div>
       <div class="metric-card">
         <div class="metric-label">Chuông báo âm thanh</div>
-        <div class="metric-value" style="color:var(--success);">BẬT 🔔</div>
+        <div class="metric-value" style="color:{snd_status_color};">{snd_status_text}</div>
         <div class="metric-subtext">Giọng ElevenLabs tiếng Việt</div>
       </div>
       <div class="metric-card">
@@ -2739,6 +2745,11 @@ def v_messages(qs: Dict[str, List[str]]) -> str:
           <div class="card-subtitle">Cập nhật liên tục — Biết ngay nhóm nào và kênh nào vừa có tin nhắn</div>
         </div>
         <div style="display:flex;gap:10px;align-items:center;">
+          <button onclick="fetch('/api/toggle_sound',{{method:'POST'}}).then(()=>location.reload())" 
+                  class="btn btn-secondary" 
+                  style="cursor:pointer;padding:8px 14px;font-size:13px;font-weight:600;border-radius:8px;background:var(--bg-surface);border:1px solid var(--border-default);color:var(--text-primary);display:inline-flex;align-items:center;gap:6px;">
+            {snd_toggle_label}
+          </button>
           <input type="text" id="filter-messages" placeholder="🔍 Tìm kiếm theo kênh, người gửi, nội dung..." 
                  oninput="filterTable('filter-messages', '#messages-table')" 
                  style="padding:8px 14px;border-radius:8px;border:1px solid var(--border-default);background:var(--bg-surface);color:var(--text-primary);font-size:13px;min-width:280px;">
@@ -2927,6 +2938,18 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(500, json.dumps({"status": "error", "error": str(e)}), "application/json")
             elif path == "/api/sound_config":
                 self._send(200, json.dumps(load_sound_config()), "application/json")
+            elif path == "/api/toggle_sound":
+                try:
+                    cfg = load_sound_config()
+                    new_enabled = not cfg.get("enabled", True)
+                    cfg["enabled"] = new_enabled
+                    cfg_file = os.path.join(CONFIG_DIR, "sound-notifier.json")
+                    os.makedirs(CONFIG_DIR, exist_ok=True)
+                    with open(cfg_file, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, indent=2)
+                    self._send(200, json.dumps({"status": "ok", "enabled": new_enabled, "config": cfg}), "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"status": "error", "error": str(e)}), "application/json")
             elif path == "/api/ai_summary":
                 summary_data = generate_ai_catchup_summary()
                 self._send(200, json.dumps(summary_data, ensure_ascii=False), "application/json")
@@ -3013,6 +3036,26 @@ class Handler(BaseHTTPRequestHandler):
                     snd = data.get("sound")
                     play_audio_alert(is_mention=is_mention, custom_sound=snd)
                     self._send(200, json.dumps({"status": "ok", "played": True}), "application/json")
+                except Exception as ex:
+                    self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
+                return
+            elif path == "/api/toggle_sound":
+                try:
+                    cfg = load_sound_config()
+                    new_enabled = not cfg.get("enabled", True)
+                    if raw_body:
+                        try:
+                            data = json.loads(raw_body)
+                            if "enabled" in data:
+                                new_enabled = bool(data["enabled"])
+                        except Exception:
+                            pass
+                    cfg["enabled"] = new_enabled
+                    cfg_file = os.path.join(CONFIG_DIR, "sound-notifier.json")
+                    os.makedirs(CONFIG_DIR, exist_ok=True)
+                    with open(cfg_file, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, indent=2)
+                    self._send(200, json.dumps({"status": "ok", "enabled": new_enabled, "config": cfg}), "application/json")
                 except Exception as ex:
                     self._send(500, json.dumps({"status": "error", "error": str(ex)}), "application/json")
                 return
