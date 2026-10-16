@@ -673,24 +673,44 @@ class UnifiedMessageHub:
         raw_ch_name = self.channel_names.get(chid, "")
         sender = self.user_names.get(pubkey, f"Thành viên {pubkey[:6]}" if pubkey else "Buzz")
 
+        # Check for DM / Group DM from tags if no named channel exists
+        p_tags = [t[1] for t in tags if t and len(t) >= 2 and t[0] == "p"] if tags else []
+        is_dm_event = (kind in (4, 1059) or (kind == 9 and not raw_ch_name and bool(p_tags)))
+
         # Format channel name nicely
         if raw_ch_name:
             ch_name = raw_ch_name
         elif chid and chid in self.dm_channels:
-            ch_name = f"DM ({self.dm_channels[chid]})"
+            partner = self.dm_channels[chid]
+            ch_name = f"DM ({partner if isinstance(partner, str) else sender})"
+        elif is_dm_event:
+            other_names = [self.user_names.get(p) for p in p_tags if p != MY_PUBKEY and p in self.user_names]
+            if other_names:
+                ch_name = f"DM ({', '.join(other_names[:2])})"
+            elif pubkey != MY_PUBKEY and sender and not sender.startswith("Thành viên"):
+                ch_name = f"DM ({sender})"
+            elif other_participants := [p for p in p_tags if p != MY_PUBKEY]:
+                ch_name = f"DM ({other_participants[0][:6]})"
+            else:
+                ch_name = "DM"
+
+            if chid and ch_name.startswith("DM ("):
+                self.dm_channels[chid] = ch_name[4:-1]
+                self.channel_names[chid] = ch_name
         elif chid:
             ch_name = f"#{chid[:6]}"
         else:
             ch_name = "general"
 
         # Explicit DM check (strictly match DM without fuzzy substring on words like admin)
-        is_dm = (raw_ch_name.upper() == "DM" or kind in (4, 1059) or ch_name.upper() == "DM" or ch_name.startswith("DM (") or ch_name.startswith("DM -"))
+        is_dm = (is_dm_event or raw_ch_name.upper() == "DM" or kind in (4, 1059) or ch_name.upper() == "DM" or ch_name.startswith("DM (") or ch_name.startswith("DM -"))
         if is_dm:
             if not ch_name.startswith("DM ("):
                 if pubkey != MY_PUBKEY and sender and not sender.startswith("Thành viên"):
                     ch_name = f"DM ({sender})"
                 elif chid and chid in self.dm_channels:
-                    ch_name = f"DM ({self.dm_channels[chid]})"
+                    partner = self.dm_channels[chid]
+                    ch_name = f"DM ({partner if isinstance(partner, str) else sender})"
                 else:
                     ch_name = "DM"
 

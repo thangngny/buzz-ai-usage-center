@@ -456,14 +456,31 @@
   }
 
   function switchWorkspace(commKey) {
+    const railButtons = getAllRailWorkspaceButtons();
     const btn = getWorkspaceButton(commKey);
+    const railInfo = railButtons.map((b, i) => ({
+      i,
+      top: Math.round(b.getBoundingClientRect().top),
+      tag: b.tagName,
+      cls: (b.className || "").slice(0, 30),
+      title: b.getAttribute("title") || b.getAttribute("aria-label"),
+      imgAlt: b.querySelector("img")?.getAttribute("alt"),
+      txt: (b.innerText || "").trim().slice(0, 15)
+    }));
     if (btn) {
-      console.log(`[BUZZ NAV] Switching Workspace to ${commKey}`, btn);
+      const btnIdx = railButtons.indexOf(btn);
+      logToServer("WORKSPACE_SWITCHED", {
+        community: commKey,
+        btnIdx,
+        top: Math.round(btn.getBoundingClientRect().top),
+        title: btn.getAttribute("title") || btn.getAttribute("aria-label"),
+        imgAlt: btn.querySelector("img")?.getAttribute("alt"),
+        allRails: railInfo
+      });
       deepClick(btn);
-      logToServer("WORKSPACE_SWITCHED", { community: commKey, title: btn.getAttribute("title") });
       return true;
     }
-    console.warn(`[BUZZ NAV] Workspace button not found for ${commKey}`);
+    logToServer("WORKSPACE_SWITCH_FAILED", { community: commKey, allRails: railInfo });
     return false;
   }
 
@@ -512,6 +529,86 @@
     } catch(e) {}
   }
 
+  function getActiveCommunity() {
+    try {
+      const activeId = localStorage.getItem("buzz-active-community-id");
+      const storedComms = JSON.parse(localStorage.getItem("buzz-communities") || "[]");
+      if (activeId && Array.isArray(storedComms)) {
+        const found = storedComms.find(c => c.id === activeId);
+        if (found) {
+          return {
+            id: activeId,
+            name: cleanStr(found.name || ""),
+            rawName: found.name || "",
+            relayUrl: found.relayUrl || ""
+          };
+        }
+      }
+    } catch(e) {}
+    return null;
+  }
+
+  function isWorkspaceActive(commTarget) {
+    if (!commTarget) return true;
+    const cleanTarget = cleanStr(commTarget);
+    const active = getActiveCommunity();
+    if (active && active.name) {
+      if (active.name === cleanTarget || active.name.includes(cleanTarget) || cleanTarget.includes(active.name)) {
+        return true;
+      }
+    }
+    // Check sidebar profile header for community name
+    const sidebarProfile = document.querySelector(".group\\/profile-card, [class*='profile']");
+    if (sidebarProfile) {
+      const t = cleanStr(sidebarProfile.innerText || sidebarProfile.textContent || "");
+      if (t.includes(cleanTarget)) return true;
+    }
+    return false;
+  }
+
+  function isSidebarPopulated() {
+    try {
+      const streamList = document.getElementById("sidebar-stream-list") || document.querySelector('[data-testid="stream-list"]');
+      if (streamList && streamList.children.length > 0) return true;
+      const menuItems = document.querySelectorAll("li[data-sidebar='menu-item'], .group\\/menu-item");
+      if (menuItems.length > 0) return true;
+      const channelBtns = Array.from(document.querySelectorAll("button, a, [role='button']")).filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.left >= 35 && r.left <= 345 && r.top >= 60 && r.height >= 14 && r.height <= 50;
+      });
+      if (channelBtns.length > 5) return true;
+    } catch(e) {}
+    return false;
+  }
+
+  function showNavigationNotice(title, subtitle, isError = false) {
+    try {
+      const container = createToastContainer();
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = "buzz-toast-card";
+      toast.style.borderColor = isError ? "rgba(239, 68, 68, 0.4)" : "rgba(56, 189, 248, 0.4)";
+      toast.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:16px;">${isError ? "⚠️" : "🧭"}</span>
+          <div style="flex:1;">
+            <div style="font-size:12.5px;font-weight:700;color:${isError ? '#f87171' : '#38bdf8'};">${title}</div>
+            <div style="font-size:11.5px;color:#d4d4d8;">${subtitle}</div>
+          </div>
+        </div>
+      `;
+      container.appendChild(toast);
+      setTimeout(() => {
+        if (toast.parentElement) {
+          toast.style.opacity = '0';
+          toast.style.transform = 'translateY(15px)';
+          toast.style.transition = 'all 0.25s ease';
+          setTimeout(() => toast.remove(), 250);
+        }
+      }, 3500);
+    } catch(e) {}
+  }
+
   let currentNavToken = 0;
 
   function navigateToMessage(msg) {
@@ -556,9 +653,6 @@
     console.log(`[BUZZ NAV] Universal Section/Category Navigation -> Community: [${commTarget}], Target: [${rawChan}], isDM: ${isDM}, Sender: [${senderTarget}]`);
     logToServer("NAVIGATE_START", { community: commTarget, channel: rawChan, isDM, sender: senderTarget });
 
-    // Step 1: Switch Workspace in DOM
-    switchWorkspace(commTarget);
-
     // Notify backend
     fetch("http://127.0.0.1:8787/api/nav_exec", {
       method: "POST",
@@ -566,7 +660,69 @@
       body: JSON.stringify(msg)
     }).catch(() => {});
 
-    // Step 2: Search and enter target Channel / DM / Folder in Sidebar
+    // Phase 1: Ensure workspace is active and sidebar is mounted before channel search
+    function ensureWorkspacePhase(onPhaseReady) {
+      if (navToken !== currentNavToken) return;
+
+      if (!commTarget || isWorkspaceActive(commTarget)) {
+        logToServer("WORKSPACE_ALREADY_ACTIVE", { community: commTarget });
+        if (isSidebarPopulated()) {
+          onPhaseReady();
+        } else {
+          setTimeout(onPhaseReady, 180);
+        }
+        return;
+      }
+
+      // Switch workspace
+      const switched = switchWorkspace(commTarget);
+      if (!switched) {
+        logToServer("WORKSPACE_SWITCH_FAILED", { community: commTarget });
+        showNavigationNotice("Không tìm thấy cộng đồng", `Không tìm thấy nút cho ${commTarget}`, true);
+        return;
+      }
+
+      // Wait for workspace to become active and sidebar to populate
+      let attempts = 35; // 35 * 100ms = 3.5s
+      let hasReclicked = false;
+      const checkInterval = 100;
+
+      function waitForReady() {
+        if (navToken !== currentNavToken) return;
+        const active = isWorkspaceActive(commTarget);
+        const populated = isSidebarPopulated();
+
+        if (active && populated) {
+          logToServer("WORKSPACE_READY", { community: commTarget, attemptsRemaining: attempts });
+          // Settling time for React tree before starting channel search
+          setTimeout(() => {
+            if (navToken === currentNavToken) onPhaseReady();
+          }, 200);
+          return;
+        }
+
+        attempts--;
+        if (attempts <= 0) {
+          logToServer("WORKSPACE_READY_TIMEOUT", { community: commTarget, active, populated });
+          onPhaseReady();
+          return;
+        }
+
+        // Only retry click once if after 1.5s active community hasn't changed at all
+        if (attempts === 20 && !active && !hasReclicked) {
+          hasReclicked = true;
+          logToServer("WORKSPACE_RECLICK_RETRY", { community: commTarget });
+          const btn = getWorkspaceButton(commTarget);
+          if (btn) deepClick(btn);
+        }
+
+        setTimeout(waitForReady, checkInterval);
+      }
+
+      setTimeout(waitForReady, 100);
+    }
+
+    // Phase 2: Search and enter target Channel / DM / Folder in Sidebar
     function tryEnterTarget(attemptsLeft) {
       if (navToken !== currentNavToken) return;
       expandAllSidebarSections();
@@ -786,25 +942,16 @@
           }
         }, 350);
       } else if (attemptsLeft > 0) {
-        if (attemptsLeft === 25 || attemptsLeft === 15) {
-          switchWorkspace(commTarget);
-        }
         setTimeout(() => tryEnterTarget(attemptsLeft - 1), 180);
       } else {
-        logToServer("TARGET_SEARCH_TIMEOUT", { channel: rawChan });
-        setTimeout(() => {
-          if (navToken === currentNavToken) {
-            if (msg.is_thread && msg.kind === 40003 && (msg.root_id || msg.root_excerpt)) {
-              navigateIntoThreadAndSpotlight(msg, 25, navToken);
-            } else {
-              spotlightTargetMessage(msg, 25, navToken);
-            }
-          }
-        }, 300);
+        const visibleSidebarTexts = allSidebar.map(el => (el.innerText || el.textContent || "").trim()).filter(Boolean).slice(0, 30);
+        logToServer("TARGET_SEARCH_TIMEOUT", { channel: rawChan, visibleSidebar: visibleSidebarTexts });
+        console.warn(`[BUZZ NAV] Target not found in sidebar: [${rawChan}]. Avoiding false spotlight.`);
+        showNavigationNotice("Không tìm thấy kênh", `Đã vào ${commTarget}, không thấy #${rawChan}`, true);
       }
     }
 
-    setTimeout(() => tryEnterTarget(35), 280);
+    ensureWorkspacePhase(() => tryEnterTarget(35));
   }
 
   // =========================================================================
@@ -3470,6 +3617,14 @@
         } else if (cmd.type === "close_drawer") {
           closeDrawer();
           result = { status: "drawer_closed", isDrawerOpen: false };
+        } else if (cmd.type === "get_state") {
+          const active = getActiveCommunity();
+          const storedComms = JSON.parse(localStorage.getItem("buzz-communities") || "[]");
+          result = {
+            active,
+            commsCount: storedComms.length,
+            isSidebarReady: isSidebarPopulated()
+          };
         } else if (cmd.type === "switch_workspace") {
           const ok = switchWorkspace(cmd.community);
           result = { status: ok ? "switched" : "failed", community: cmd.community };
