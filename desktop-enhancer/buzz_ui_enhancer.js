@@ -721,7 +721,7 @@
         highlightElement(clickable);
         setTimeout(() => {
           if (navToken === currentNavToken) {
-            if (msg.is_thread && (msg.root_id || msg.root_excerpt)) {
+            if (msg.is_thread && msg.kind === 40003 && (msg.root_id || msg.root_excerpt)) {
               navigateIntoThreadAndSpotlight(msg, 25, navToken);
             } else {
               spotlightTargetMessage(msg, 25, navToken);
@@ -737,7 +737,7 @@
         logToServer("TARGET_SEARCH_TIMEOUT", { channel: rawChan });
         setTimeout(() => {
           if (navToken === currentNavToken) {
-            if (msg.is_thread && (msg.root_id || msg.root_excerpt)) {
+            if (msg.is_thread && msg.kind === 40003 && (msg.root_id || msg.root_excerpt)) {
               navigateIntoThreadAndSpotlight(msg, 15, navToken);
             } else {
               spotlightTargetMessage(msg, 15, navToken);
@@ -1043,15 +1043,15 @@
 
   function findOpenThreadPane() {
     try {
-      const candidates = Array.from(document.querySelectorAll("aside, section, div[role='region'], div[role='complementary'], div")).filter(el => {
+      const candidates = Array.from(document.querySelectorAll("aside, section, div[role='region'], div[role='complementary']")).filter(el => {
         if (el.id === "buzz-hub-drawer" || el.id === "buzz-hub-pill" || el.id === "buzz-rail-hub-btn") return false;
         if (el.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, [data-sidebar]")) return false;
         const r = el.getBoundingClientRect();
-        if (r.left < (window.innerWidth * 0.38) || r.width < 250 || r.height < 200) return false;
+        if (r.left < (window.innerWidth * 0.45) || r.width < 250 || r.height < 200) return false;
         const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
-        const isThreadCls = cls.includes("thread") || cls.includes("replies") || el.getAttribute("data-panel") === "thread";
-        const hasInput = !!el.querySelector("textarea, [contenteditable='true'], input");
-        return isThreadCls || (r.left >= 420 && hasInput);
+        const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+        const isThreadCls = cls.includes("thread") || cls.includes("replies") || el.getAttribute("data-panel") === "thread" || aria.includes("thread");
+        return isThreadCls;
       });
       return candidates[0] || null;
     } catch(e) {
@@ -1205,7 +1205,19 @@
   function navigateIntoThreadAndSpotlight(msg, attemptsLeft = 25, navToken) {
     if (!msg || (navToken && navToken !== currentNavToken)) return;
 
-    // Check if thread pane is ALREADY open and child message is already present
+    // 1. Direct check: If target message is already visible in main chat, spotlight directly!
+    const candidateEl = findMessageInScope(document.body, msg);
+    if (candidateEl) {
+      const targetRow = findMessageRow(candidateEl);
+      if (targetRow) {
+        console.log("[BUZZ THREAD NAV] Target message already directly visible on screen:", targetRow);
+        logToServer("THREAD_MESSAGE_DIRECT_SPOTLIGHT", { sender: msg.sender, content: (msg.content || "").slice(0, 30) });
+        applySpotlightEffect(targetRow, msg, true);
+        return;
+      }
+    }
+
+    // 2. Check if thread pane is ALREADY open and child message is present inside it
     const openPane = findOpenThreadPane();
     if (openPane) {
       const childEl = findMessageInScope(openPane, msg);
@@ -1218,7 +1230,7 @@
       }
     }
 
-    // Search for root message row in main chat
+    // 3. Search for root message row in main chat
     const rootRow = findThreadRootRow(msg);
     if (rootRow) {
       console.log("[BUZZ THREAD NAV] Found Root Message Row in Main Chat:", rootRow);
@@ -1253,22 +1265,7 @@
       }
     }
 
-    // Check if there are any buttons with "reply/replies" in main chat view
-    const allReplyButtons = Array.from(document.querySelectorAll("button, [role='button'], a")).filter(b => {
-      if (b.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, [data-sidebar]")) return false;
-      const txt = (b.innerText || b.textContent || "").trim();
-      return /(\d+\s*(reply|replies|trả lời|phản hồi)|💬)/i.test(txt);
-    });
-
-    if (allReplyButtons.length > 0) {
-      const replyBtn = allReplyButtons[0];
-      console.log("[BUZZ THREAD NAV] Found fallback reply button:", replyBtn);
-      logToServer("THREAD_OPEN_CLICKED", { fallback: true, btnText: replyBtn.innerText });
-      deepClick(replyBtn);
-      setTimeout(() => waitForThreadAndSpotlightChild(msg, 30, navToken), 300);
-      return;
-    }
-
+    // 4. Retry loop with upward scrolling if root row not yet visible
     if (attemptsLeft > 0) {
       if (attemptsLeft % 4 === 0) {
         const scrollCont = findChatScrollContainer();

@@ -680,22 +680,16 @@ class UnifiedMessageHub:
                     is_mention = True
                     break
 
-        # Thread detection (Kind 40003 or 'e' tags referencing parent/root message)
+        # Thread detection: ONLY genuine Kind 40003 thread replies in Buzz
         is_thread = (kind == 40003)
         root_id = ""
-        if tags:
+        if is_thread and tags:
             for t in tags:
                 if t and len(t) >= 2 and t[0] == "e":
                     teid = t[1]
                     if teid and teid != chid:
-                        marker = t[3] if len(t) > 3 else ""
-                        if marker == "root":
-                            root_id = teid
-                            is_thread = True
-                            break
-                        elif not root_id:
-                            root_id = teid
-                            is_thread = True
+                        root_id = teid
+                        break
 
         norm_ts = self.normalize_timestamp(created_at)
         lt = time.localtime(norm_ts)
@@ -705,6 +699,7 @@ class UnifiedMessageHub:
 
         item = {
             "id": eid,
+            "kind": kind,
             "time": time.strftime("%H:%M · %d/%m", lt),
             "full_time": time.strftime("%H:%M:%S · %d/%m/%Y", lt),
             "timestamp": norm_ts,
