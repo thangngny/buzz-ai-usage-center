@@ -396,11 +396,30 @@
     const railButtons = getAllRailWorkspaceButtons();
     if (!railButtons.length) return null;
 
-    // 1. Dynamic Title / Tooltip Substring Match (handles "phamgianam — 1 mention", "phuongstory", etc.)
+    // 1. Direct Attribute & Child Img Alt Match (handles Buzz avatars, tooltips, and image alts)
     for (const btn of railButtons) {
       const title = cleanStr(btn.getAttribute("title") || btn.getAttribute("aria-label") || btn.getAttribute("data-tooltip") || "");
-      if (title && (title.includes(cleanKey) || cleanKey.includes(title))) {
+      if (title && (title === cleanKey || title.includes(cleanKey) || cleanKey.includes(title))) {
         return btn;
+      }
+      const img = btn.querySelector("img");
+      if (img) {
+        const alt = cleanStr(img.getAttribute("alt") || img.getAttribute("title") || "");
+        if (alt && (alt === cleanKey || alt.includes(cleanKey) || cleanKey.includes(alt))) {
+          return btn;
+        }
+      }
+      // Check React props on button or child
+      for (const el of [btn, img].filter(Boolean)) {
+        for (const k of Object.keys(el)) {
+          if (k.startsWith("__reactProps") || k.startsWith("__reactFiber")) {
+            const p = el[k];
+            const pName = cleanStr(p?.community?.name || p?.item?.name || p?.name || p?.alt || "");
+            if (pName && (pName === cleanKey || pName.includes(cleanKey) || cleanKey.includes(pName))) {
+              return btn;
+            }
+          }
+        }
       }
     }
 
@@ -597,6 +616,35 @@
         return cls.includes("group/section-label") || (cls.includes("shrink-0") && cls.includes("rounded-md") && !cls.includes("peer/menu-button"));
       });
 
+      // Tier -1: Direct Channel / DM ID Match (100% exact, immune to renames & hex fallback)
+      const targetChId = (msg.channel_id || "").toLowerCase().trim();
+      const targetPubkey = (msg.pubkey || "").toLowerCase().trim();
+      if ((targetChId || targetPubkey) && !targetElement) {
+        for (const el of allSidebar) {
+          const elChId = (el.getAttribute("data-channel-id") || el.getAttribute("data-id") || "").toLowerCase().trim();
+          if (targetChId && elChId && (elChId === targetChId || (elChId.length >= 8 && targetChId.includes(elChId)))) {
+            targetElement = el;
+            break;
+          }
+          for (const k of Object.keys(el)) {
+            if (k.startsWith("__reactProps") || k.startsWith("__reactFiber")) {
+              const p = el[k];
+              const pChId = (p?.channel?.id || p?.channelId || p?.item?.id || p?.stream?.id || p?.conversation?.id || "").toLowerCase().trim();
+              const pPubkey = (p?.user?.pubkey || p?.contact?.pubkey || p?.pubkey || "").toLowerCase().trim();
+              if (targetChId && pChId && (pChId === targetChId || (pChId.length >= 8 && targetChId.includes(pChId)))) {
+                targetElement = el;
+                break;
+              }
+              if (isDM && targetPubkey && pPubkey && (pPubkey === targetPubkey || (pPubkey.length >= 8 && targetPubkey.includes(pPubkey)))) {
+                targetElement = el;
+                break;
+              }
+            }
+          }
+          if (targetElement) break;
+        }
+      }
+
       // 1. Direct Messages: Match strictly by recipient / contact name
       if (isDM) {
         let dmContact = "";
@@ -616,6 +664,15 @@
               break;
             }
           }
+          if (!targetElement) {
+            for (const el of allSidebar) {
+              const textClean = cleanStr(el.innerText || el.textContent || "");
+              if (textClean && (textClean === dmContact || textClean.includes(dmContact) || dmContact.includes(textClean))) {
+                targetElement = el;
+                break;
+              }
+            }
+          }
         }
       }
 
@@ -633,7 +690,7 @@
         if (!targetElement) {
           for (const el of channelButtons) {
             const textClean = cleanStr(el.innerText || el.textContent || "");
-            if (textClean && (textClean.startsWith(chanClean) || chanClean.startsWith(textClean))) {
+            if (textClean && (textClean.startsWith(chanClean) || (chanClean.length >= 4 && chanClean.startsWith(textClean)))) {
               targetElement = el;
               break;
             }
@@ -722,14 +779,14 @@
         setTimeout(() => {
           if (navToken === currentNavToken) {
             if (msg.is_thread && msg.kind === 40003 && (msg.root_id || msg.root_excerpt)) {
-              navigateIntoThreadAndSpotlight(msg, 25, navToken);
+              navigateIntoThreadAndSpotlight(msg, 35, navToken);
             } else {
-              spotlightTargetMessage(msg, 25, navToken);
+              spotlightTargetMessage(msg, 35, navToken);
             }
           }
         }, 350);
       } else if (attemptsLeft > 0) {
-        if (attemptsLeft === 24 || attemptsLeft === 15) {
+        if (attemptsLeft === 25 || attemptsLeft === 15) {
           switchWorkspace(commTarget);
         }
         setTimeout(() => tryEnterTarget(attemptsLeft - 1), 180);
@@ -738,9 +795,9 @@
         setTimeout(() => {
           if (navToken === currentNavToken) {
             if (msg.is_thread && msg.kind === 40003 && (msg.root_id || msg.root_excerpt)) {
-              navigateIntoThreadAndSpotlight(msg, 15, navToken);
+              navigateIntoThreadAndSpotlight(msg, 25, navToken);
             } else {
-              spotlightTargetMessage(msg, 15, navToken);
+              spotlightTargetMessage(msg, 25, navToken);
             }
           }
         }, 300);
@@ -845,17 +902,18 @@
         }
       }
 
-      // Accurate dual scrolling (Direct container scrollTo + scrollIntoView)
+      // Accurate centered scrolling (Single scroll controller to prevent smooth scroll fighting)
       const scrollParent = el.closest('[class*="overflow-y-auto"], [class*="overflow-auto"], main, section, [role="log"]') || findChatScrollContainer();
       if (scrollParent) {
         const parentRect = scrollParent.getBoundingClientRect();
         const elRect = el.getBoundingClientRect();
         const targetScrollTop = scrollParent.scrollTop + (elRect.top - parentRect.top) - (parentRect.height / 2) + (elRect.height / 2);
         scrollParent.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
+      } else {
+        try {
+          el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        } catch(e) {}
       }
-      try {
-        el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-      } catch(e) {}
 
       // Key listener for Escape
       activeSpotlightKeyHandler = (e) => {
@@ -912,7 +970,21 @@
 
   function spotlightInMainChatPane(msg, attemptsLeft, navToken) {
     if (!msg || (navToken && navToken !== currentNavToken)) return;
+
+    // Tier 0: Direct Event / Message ID Matching (O(1) exact)
+    if (msg.id) {
+      const targetId = msg.id.toLowerCase().trim();
+      const directEl = document.querySelector(`[data-event-id="${targetId}"], [data-message-id="${targetId}"], [data-id="${targetId}"], [id="${targetId}"], [id="msg-${targetId}"]`);
+      if (directEl) {
+        const container = findMessageRow(directEl);
+        logToServer("MESSAGE_SPOTLIGHTED_MAIN_ID", { id: targetId, sender: msg.sender });
+        applySpotlightEffect(container, msg);
+        return;
+      }
+    }
+
     const cleanTargetContent = cleanStr(msg.content);
+    const cleanTargetSender = cleanStr(msg.sender);
     const rawWords = (msg.content || "").trim().split(/\s+/).filter(w => w.length > 2);
     const searchSnippet = rawWords.slice(0, 4).join(" ").toLowerCase();
 
@@ -944,6 +1016,8 @@
         if (matched >= 2) score += (matched * 15);
       }
 
+      // Sender bonus ONLY if content has already matched
+      if (score > 0 && cleanTargetSender && txtClean.includes(cleanTargetSender)) score += 30;
       if (el.classList.contains("message-markdown") || el.classList.contains("text-message")) score += 25;
 
       if (score > maxScore) {
@@ -952,20 +1026,31 @@
       }
     }
 
-    const minScore = cleanTargetContent ? 65 : 35;
+    const minScore = (!cleanTargetContent || cleanTargetContent.length < 6) ? 70 : 50;
     if (best && maxScore >= minScore) {
       const container = findMessageRow(best);
       console.log("[BUZZ SPOTLIGHT] Focused in Main Conversation Pane:", container);
       logToServer("MESSAGE_SPOTLIGHTED_MAIN", { sender: msg.sender, score: maxScore });
       applySpotlightEffect(container, msg);
     } else if (attemptsLeft > 0) {
+      if (attemptsLeft <= 25 && attemptsLeft % 2 === 0) {
+        const scrollCont = findChatScrollContainer();
+        if (scrollCont && scrollCont.scrollTop > 0) {
+          scrollCont.scrollBy({ top: -500, behavior: "smooth" });
+        }
+      }
       setTimeout(() => spotlightInMainChatPane(msg, attemptsLeft - 1, navToken), 200);
     }
   }
 
   function findChatScrollContainer() {
+    const virtuoso = document.querySelector('[data-virtuoso-scroller="true"], [data-testid="virtuoso-scroller"]');
+    if (virtuoso && virtuoso.scrollHeight > virtuoso.clientHeight) {
+      return virtuoso;
+    }
     const candidateContainers = Array.from(document.querySelectorAll("main, section, div, [role='log']")).filter(el => {
       if (el.id === "buzz-hub-drawer" || el.id === "buzz-hub-pill" || el.id === "buzz-rail-hub-btn") return false;
+      if (el.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, aside, [data-sidebar]")) return false;
       const r = el.getBoundingClientRect();
       if (r.left < 180 || r.width < 200 || r.height < 150) return false;
       const st = window.getComputedStyle(el);
@@ -976,8 +1061,22 @@
     return candidateContainers[0] || null;
   }
 
-  function spotlightTargetMessage(msg, attemptsLeft = 25, navToken) {
+  function spotlightTargetMessage(msg, attemptsLeft = 35, navToken) {
     if (!msg || (!msg.content && !msg.sender) || (navToken && navToken !== currentNavToken)) return;
+
+    // Tier 0: Direct Event / Message ID Matching (O(1) exact, 100% reliable)
+    if (msg.id) {
+      const targetId = msg.id.toLowerCase().trim();
+      const directEl = document.querySelector(`[data-event-id="${targetId}"], [data-message-id="${targetId}"], [data-id="${targetId}"], [id="${targetId}"], [id="msg-${targetId}"]`);
+      if (directEl) {
+        const row = findMessageRow(directEl);
+        console.log("[BUZZ SPOTLIGHT] Exact Event ID Match (DOM attribute):", row);
+        logToServer("MESSAGE_SPOTLIGHTED_ID_EXACT", { id: targetId, sender: msg.sender });
+        applySpotlightEffect(row, msg);
+        return;
+      }
+    }
+
     const cleanTargetContent = cleanStr(msg.content);
     const cleanTargetSender = cleanStr(msg.sender);
     const rawWords = (msg.content || "").trim().split(/\s+/).filter(w => w.length > 2);
@@ -991,6 +1090,26 @@
              r.top >= 65 && r.top <= (window.innerHeight - 100) &&
              el.children.length <= 6;
     });
+
+    // Tier 0.5: Check React Fiber props for exact event ID
+    if (msg.id) {
+      const targetId = msg.id.toLowerCase().trim();
+      for (const el of candidateElements) {
+        for (const k of Object.keys(el)) {
+          if (k.startsWith("__reactProps") || k.startsWith("__reactFiber")) {
+            const p = el[k];
+            const eventId = (p?.event?.id || p?.message?.id || p?.item?.id || p?.id || "").toLowerCase().trim();
+            if (eventId && eventId === targetId) {
+              const row = findMessageRow(el);
+              console.log("[BUZZ SPOTLIGHT] Exact Event ID Match (React Props):", row);
+              logToServer("MESSAGE_SPOTLIGHTED_REACT_ID", { id: targetId, sender: msg.sender });
+              applySpotlightEffect(row, msg);
+              return;
+            }
+          }
+        }
+      }
+    }
 
     let bestMatch = null;
     let bestScore = 0;
@@ -1011,7 +1130,8 @@
         if (matchedWords >= 2) score += (matchedWords * 12);
       }
 
-      if (cleanTargetSender && txtClean.includes(cleanTargetSender)) score += 40;
+      // Sender points (+40) are strictly awarded only if content already matched (prevents false matches on author alone)
+      if (score > 0 && cleanTargetSender && txtClean.includes(cleanTargetSender)) score += 40;
       if (el.classList.contains("message-markdown") || el.classList.contains("text-message")) score += 20;
 
       if (score > bestScore) {
@@ -1020,20 +1140,21 @@
       }
     }
 
-    const minScore = cleanTargetContent ? 65 : 35;
+    const minScore = (!cleanTargetContent || cleanTargetContent.length < 6) ? 70 : 50;
     if (bestMatch && bestScore >= minScore) {
       const container = findMessageRow(bestMatch);
       console.log("[BUZZ SPOTLIGHT] Direct Message Spotlight Success:", container);
       logToServer("MESSAGE_SPOTLIGHTED_DIRECT", { sender: msg.sender, score: bestScore });
       applySpotlightEffect(container, msg);
     } else if (attemptsLeft > 0) {
-      if (attemptsLeft <= 12 && attemptsLeft % 3 === 0) {
+      // Early & robust upward scroll traversing up to 7,500px of virtualized conversation history
+      if (attemptsLeft <= 30 && attemptsLeft % 2 === 0) {
         const scrollCont = findChatScrollContainer();
         if (scrollCont && scrollCont.scrollTop > 0) {
-          scrollCont.scrollBy({ top: -350, behavior: "smooth" });
+          scrollCont.scrollBy({ top: -500, behavior: "smooth" });
         }
       }
-      setTimeout(() => spotlightTargetMessage(msg, attemptsLeft - 1, navToken), 220);
+      setTimeout(() => spotlightTargetMessage(msg, attemptsLeft - 1, navToken), 200);
     }
   }
 
@@ -1148,7 +1269,7 @@
         }
         if (matched >= 2) score += (matched * 15);
       }
-      if (rootSender && txtClean.includes(rootSender)) score += 30;
+      if (score > 0 && rootSender && txtClean.includes(rootSender)) score += 30;
 
       if (score > bestScore) {
         bestScore = score;
@@ -1165,6 +1286,15 @@
     // 1. Search inside open thread pane if available
     const threadPane = findOpenThreadPane();
     if (threadPane) {
+      if (msg.id) {
+        const idMatch = threadPane.querySelector(`[data-event-id="${msg.id}"], [data-message-id="${msg.id}"], [data-id="${msg.id}"], [id="${msg.id}"]`);
+        if (idMatch) {
+          const targetRow = findMessageRow(idMatch);
+          logToServer("THREAD_MESSAGE_SPOTLIGHTED_ID", { id: msg.id, sender: msg.sender });
+          applySpotlightEffect(targetRow, msg, true);
+          return;
+        }
+      }
       const foundEl = findMessageInScope(threadPane, msg);
       if (foundEl) {
         const targetRow = findMessageRow(foundEl);
@@ -1198,11 +1328,11 @@
       setTimeout(() => waitForThreadAndSpotlightChild(msg, attemptsLeft - 1, navToken), 180);
     } else {
       console.log("[BUZZ THREAD NAV] Thread child search timeout -> Fallback spotlight");
-      spotlightTargetMessage(msg, 10, navToken);
+      spotlightTargetMessage(msg, 15, navToken);
     }
   }
 
-  function navigateIntoThreadAndSpotlight(msg, attemptsLeft = 25, navToken) {
+  function navigateIntoThreadAndSpotlight(msg, attemptsLeft = 35, navToken) {
     if (!msg || (navToken && navToken !== currentNavToken)) return;
 
     // 1. Direct check: If target message is already visible in main chat, spotlight directly!
@@ -1267,16 +1397,16 @@
 
     // 4. Retry loop with upward scrolling if root row not yet visible
     if (attemptsLeft > 0) {
-      if (attemptsLeft % 4 === 0) {
+      if (attemptsLeft <= 30 && attemptsLeft % 2 === 0) {
         const scrollCont = findChatScrollContainer();
         if (scrollCont && scrollCont.scrollTop > 0) {
-          scrollCont.scrollBy({ top: -300, behavior: "smooth" });
+          scrollCont.scrollBy({ top: -500, behavior: "smooth" });
         }
       }
-      setTimeout(() => navigateIntoThreadAndSpotlight(msg, attemptsLeft - 1, navToken), 220);
+      setTimeout(() => navigateIntoThreadAndSpotlight(msg, attemptsLeft - 1, navToken), 200);
     } else {
       console.log("[BUZZ THREAD NAV] Could not open thread -> Fallback spotlight in main view");
-      spotlightTargetMessage(msg, 15, navToken);
+      spotlightTargetMessage(msg, 20, navToken);
     }
   }
 

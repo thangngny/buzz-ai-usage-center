@@ -516,6 +516,27 @@ class UnifiedMessageHub:
         except Exception:
             pass
 
+        if os.path.exists(DB_HEAD):
+            try:
+                conn_h = sqlite3.connect(f"file:{DB_HEAD}?mode=ro", uri=True)
+                ch_cur = conn_h.cursor()
+                for scope, chid, events_str, saved_at in ch_cur.execute("SELECT scope, channel_id, events_json, saved_at FROM channel_head"):
+                    try:
+                        for ev in json.loads(events_str):
+                            k = ev.get("kind", 0)
+                            if k in (40, 41, 40099, 39005, 39006):
+                                cnt = ev.get("content", "")
+                                if cnt.startswith("{"):
+                                    meta = json.loads(cnt)
+                                    cname = meta.get("name") or meta.get("displayName") or meta.get("title")
+                                    if cname and chid and chid not in self.channel_names:
+                                        self.channel_names[chid] = cname
+                    except Exception:
+                        pass
+                conn_h.close()
+            except Exception:
+                pass
+
     def resolve_community(self, scope: str) -> str:
         if not scope: return "Buzz"
         s_lower = scope.lower()
@@ -790,7 +811,7 @@ class UnifiedMessageHub:
                     try:
                         for ev in json.loads(events_str):
                             k = ev.get("kind", 0)
-                            if k in (9, 40003, 4, 1, 1059) or (k == 7 and len(ev.get("content","")) < 10):
+                            if k in (9, 40003, 4, 1, 1059):
                                 ts = ev.get("created_at") or ev.get("createdAt") or ev.get("timestamp") or saved_at
                                 if self.add_message(ev.get("id"), k, ev.get("pubkey",""), ev.get("content",""), chid, scope, ts, is_live=(not initial), tags=ev.get("tags", [])):
                                     new_count += 1
