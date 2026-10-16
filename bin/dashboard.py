@@ -576,7 +576,7 @@ class UnifiedMessageHub:
 
         return False
 
-    def add_message(self, eid: str, kind: int, pubkey: str, content: str, chid: str, scope: str, created_at: Any, is_live: bool = False) -> bool:
+    def add_message(self, eid: str, kind: int, pubkey: str, content: str, chid: str, scope: str, created_at: Any, is_live: bool = False, tags: Optional[List[Any]] = None) -> bool:
         if not eid or not content:
             return False
 
@@ -629,6 +629,23 @@ class UnifiedMessageHub:
                     is_mention = True
                     break
 
+        # Thread detection (Kind 40003 or 'e' tags referencing parent/root message)
+        is_thread = (kind == 40003)
+        root_id = ""
+        if tags:
+            for t in tags:
+                if t and len(t) >= 2 and t[0] == "e":
+                    teid = t[1]
+                    if teid and teid != chid:
+                        marker = t[3] if len(t) > 3 else ""
+                        if marker == "root":
+                            root_id = teid
+                            is_thread = True
+                            break
+                        elif not root_id:
+                            root_id = teid
+                            is_thread = True
+
         norm_ts = self.normalize_timestamp(created_at)
         lt = time.localtime(norm_ts)
 
@@ -644,6 +661,10 @@ class UnifiedMessageHub:
             "pubkey": pubkey,
             "is_dm": is_dm,
             "is_mention": is_mention,
+            "is_thread": is_thread,
+            "root_id": root_id,
+            "root_sender": "",
+            "root_excerpt": "",
             "content": content
         }
 
@@ -653,6 +674,15 @@ class UnifiedMessageHub:
             # If item already exists, preserve valid specific timestamp if existing is more accurate
             if eid in self.messages:
                 existing = self.messages[eid]
+                if existing.get("timestamp") and not is_live:
+                    if norm_ts >= int(time.time()) - 5 and existing["timestamp"] < norm_ts:
+                        item["timestamp"] = existing["timestamp"]
+                        item["time"] = existing["time"]
+                        item["full_time"] = existing.get("full_time", item["full_time"])
+                if existing.get("root_sender") and not item["root_sender"]:
+                    item["root_sender"] = existing["root_sender"]
+                if existing.get("root_excerpt") and not item["root_excerpt"]:
+                    item["root_excerpt"] = existing["root_excerpt"]
                 if existing.get("timestamp") and not is_live:
                     if norm_ts >= int(time.time()) - 5 and existing["timestamp"] < norm_ts:
                         item["timestamp"] = existing["timestamp"]
@@ -711,7 +741,7 @@ class UnifiedMessageHub:
                             k = ev.get("kind", 0)
                             if k in (9, 40003, 4, 1, 1059) or (k == 7 and len(ev.get("content","")) < 10):
                                 ts = ev.get("created_at") or ev.get("createdAt") or ev.get("timestamp") or saved_at
-                                if self.add_message(ev.get("id"), k, ev.get("pubkey",""), ev.get("content",""), chid, scope, ts, is_live=(not initial)):
+                                if self.add_message(ev.get("id"), k, ev.get("pubkey",""), ev.get("content",""), chid, scope, ts, is_live=(not initial), tags=ev.get("tags", [])):
                                     new_count += 1
                     except Exception:
                         pass
@@ -728,7 +758,7 @@ class UnifiedMessageHub:
                     try:
                         for item in json.loads(val):
                             ts = item.get("createdAt") or item.get("created_at") or item.get("timestamp") or item.get("saved_at")
-                            if self.add_message(item.get("id"), item.get("kind", 9), item.get("pubkey",""), item.get("content",""), item.get("channelId",""), k, ts, is_live=(not initial)):
+                            if self.add_message(item.get("id"), item.get("kind", 9), item.get("pubkey",""), item.get("content",""), item.get("channelId",""), k, ts, is_live=(not initial), tags=item.get("tags", [])):
                                 new_count += 1
                     except Exception:
                         pass
@@ -749,7 +779,7 @@ class UnifiedMessageHub:
                                 chid = t[1]
                                 break
                         ts = created_at or data.get("created_at") or data.get("createdAt") or data.get("timestamp")
-                        if self.add_message(eid, kind, pubkey, data.get("content",""), chid, relay_url, ts, is_live=(not initial)):
+                        if self.add_message(eid, kind, pubkey, data.get("content",""), chid, relay_url, ts, is_live=(not initial), tags=data.get("tags", [])):
                             new_count += 1
                     except Exception:
                         pass
@@ -808,11 +838,17 @@ class UnifiedMessageHub:
         with self.lock:
             msgs = [dict(m) for m in self.messages.values()]
 
+        msg_map = {m["id"]: m for m in msgs}
         for m in msgs:
             chid = m.get("channel_id")
             ts = m.get("timestamp", 0)
             read_ts = read_states.get(chid, 0)
             m["is_unread"] = bool(ts > read_ts and (read_ts > 0 or ts > (now_ts - 7 * 86400)))
+            if m.get("is_thread") and m.get("root_id"):
+                root_msg = msg_map.get(m["root_id"])
+                if root_msg:
+                    m["root_sender"] = root_msg.get("sender", "")
+                    m["root_excerpt"] = root_msg.get("content", "")[:60].replace("\n", " ")
 
         return sorted(msgs, key=lambda x: x["timestamp"], reverse=True)
 
@@ -3074,7 +3110,7 @@ class Handler(BaseHTTPRequestHandler):
                         cnt = ev.get("content", "")
                         c_at = ev.get("created_at") or ev.get("createdAt") or ev.get("timestamp") or int(time.time())
                         is_live = not data.get("silent", False)
-                        is_new = MSG_HUB.add_message(ev["id"], k, pubk, cnt, chid, scope, c_at, is_live=is_live)
+                        is_new = MSG_HUB.add_message(ev["id"], k, pubk, cnt, chid, scope, c_at, is_live=is_live, tags=ev.get("tags", []))
                         if is_new:
                             MSG_HUB.save_to_disk()
                         self._send(200, json.dumps({"status": "ok", "is_new": is_new}), "application/json")

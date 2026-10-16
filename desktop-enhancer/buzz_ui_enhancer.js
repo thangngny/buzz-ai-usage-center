@@ -198,6 +198,7 @@
   }
 
   function detectItemCategory(msg) {
+    if (msg.is_thread) return { type: "thread", label: "Luồng thảo luận", icon: "🧵", color: "#c084fc" };
     const ch = (msg.channel || "").toLowerCase();
     if (msg.is_dm || ch.includes("dm") || ch.includes("tin nhan rieng")) return { type: "dm", label: "Tin riêng", icon: "👤", color: "#ec4899" };
     if (ch.includes("tư liệu") || ch.includes("quy trình") || ch.includes("trao đổi") || ch.includes("agent-") || ch.includes("project") || ch.includes("dự án") || ch.includes("team")) {
@@ -720,7 +721,11 @@
         highlightElement(clickable);
         setTimeout(() => {
           if (navToken === currentNavToken) {
-            spotlightTargetMessage(msg, 25, navToken);
+            if (msg.is_thread && (msg.root_id || msg.root_excerpt)) {
+              navigateIntoThreadAndSpotlight(msg, 25, navToken);
+            } else {
+              spotlightTargetMessage(msg, 25, navToken);
+            }
           }
         }, 350);
       } else if (attemptsLeft > 0) {
@@ -732,7 +737,11 @@
         logToServer("TARGET_SEARCH_TIMEOUT", { channel: rawChan });
         setTimeout(() => {
           if (navToken === currentNavToken) {
-            spotlightTargetMessage(msg, 15, navToken);
+            if (msg.is_thread && (msg.root_id || msg.root_excerpt)) {
+              navigateIntoThreadAndSpotlight(msg, 15, navToken);
+            } else {
+              spotlightTargetMessage(msg, 15, navToken);
+            }
           }
         }, 300);
       }
@@ -772,7 +781,7 @@
     } catch(e) {}
   }
 
-  function applySpotlightEffect(el, msg) {
+  function applySpotlightEffect(el, msg, isThread = false) {
     if (!el) return;
     try {
       clearAllSpotlights();
@@ -787,10 +796,10 @@
 
       // 1. Header Target Badge Attached to Message Bubble
       const badge = document.createElement("div");
-      badge.className = "buzz-spotlight-badge";
+      badge.className = "buzz-spotlight-badge" + (isThread ? " is-thread-spotlight" : "");
       badge.innerHTML = `
-        <span class="buzz-badge-icon">🎯</span>
-        <span class="buzz-badge-title">TIN NHẮN ĐÃ CHỌN · ${senderName}</span>
+        <span class="buzz-badge-icon">${isThread ? "🧵" : "🎯"}</span>
+        <span class="buzz-badge-title">${isThread ? "LUỒNG THẢO LUẬN" : "TIN NHẮN ĐÃ CHỌN"} · ${senderName}</span>
         ${chanName ? `<span class="buzz-badge-chan">#${chanName}</span>` : ""}
         ${timeStr ? `<span class="buzz-badge-time">${timeStr}</span>` : ""}
         <span class="buzz-badge-close" title="Bỏ làm nổi bật (Esc)">✕</span>
@@ -1025,6 +1034,252 @@
         }
       }
       setTimeout(() => spotlightTargetMessage(msg, attemptsLeft - 1, navToken), 220);
+    }
+  }
+
+  // =========================================================================
+  // THREAD DEEP NAVIGATION & SPOTLIGHT ENGINE (100% FULL PATH)
+  // =========================================================================
+
+  function findOpenThreadPane() {
+    try {
+      const candidates = Array.from(document.querySelectorAll("aside, section, div[role='region'], div[role='complementary'], div")).filter(el => {
+        if (el.id === "buzz-hub-drawer" || el.id === "buzz-hub-pill" || el.id === "buzz-rail-hub-btn") return false;
+        if (el.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, [data-sidebar]")) return false;
+        const r = el.getBoundingClientRect();
+        if (r.left < (window.innerWidth * 0.38) || r.width < 250 || r.height < 200) return false;
+        const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+        const isThreadCls = cls.includes("thread") || cls.includes("replies") || el.getAttribute("data-panel") === "thread";
+        const hasInput = !!el.querySelector("textarea, [contenteditable='true'], input");
+        return isThreadCls || (r.left >= 420 && hasInput);
+      });
+      return candidates[0] || null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  function findMessageInScope(scopeEl, msg) {
+    if (!scopeEl || !msg) return null;
+    const cleanTarget = cleanStr(msg.content);
+    const words = (msg.content || "").trim().split(/\s+/).filter(w => w.length > 2);
+    const snippet = words.slice(0, 4).join(" ").toLowerCase();
+
+    const candidates = Array.from(scopeEl.querySelectorAll("p, span, div, li, a, mark, em, strong")).filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width >= 15 && r.height >= 10 && r.height <= 400 && el.children.length <= 6;
+    });
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const el of candidates) {
+      const txt = (el.innerText || el.textContent || "").trim();
+      if (!txt) continue;
+      const txtClean = cleanStr(txt);
+      let score = 0;
+
+      if (cleanTarget && txtClean.includes(cleanTarget)) score += 100;
+      else if (snippet && txt.toLowerCase().includes(snippet)) score += 70;
+      else if (words.length > 0) {
+        let matched = 0;
+        for (const w of words) {
+          if (txt.toLowerCase().includes(w.toLowerCase())) matched++;
+        }
+        if (matched >= 2) score += (matched * 15);
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+
+    return (bestScore >= 35) ? best : null;
+  }
+
+  function findThreadTriggerButton(scopeEl) {
+    if (!scopeEl) return null;
+    const btns = Array.from(scopeEl.querySelectorAll("button, [role='button'], a, div, span")).filter(b => {
+      const r = b.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) return false;
+      const txt = (b.innerText || b.textContent || "").trim();
+      const aria = (b.getAttribute("aria-label") || b.getAttribute("title") || "").toLowerCase();
+      const cls = typeof b.className === "string" ? b.className.toLowerCase() : "";
+
+      if (/(\d+\s*(reply|replies|trả lời|tra loi|phản hồi|phan hoi)|💬)/i.test(txt)) return true;
+      if (aria.includes("reply") || aria.includes("thread") || aria.includes("trả lời") || aria.includes("replies")) return true;
+      if (cls.includes("thread") || cls.includes("reply") || cls.includes("replies")) return true;
+      return false;
+    });
+    return btns[0] || null;
+  }
+
+  function findThreadRootRow(msg) {
+    const rawExcerpt = (msg.root_excerpt || "").trim();
+    const cleanExcerpt = cleanStr(rawExcerpt);
+    const excerptWords = rawExcerpt.split(/\s+/).filter(w => w.length > 2);
+    const excerptSnippet = excerptWords.slice(0, 4).join(" ").toLowerCase();
+    const rootSender = cleanStr(msg.root_sender);
+
+    const mainCandidates = Array.from(document.querySelectorAll("p, span, div, li, a")).filter(el => {
+      if (el.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, aside, [data-sidebar], header")) return false;
+      const r = el.getBoundingClientRect();
+      return r.left >= 180 && r.width >= 20 && r.height >= 12 && r.height <= 400 &&
+             r.top >= 65 && r.top <= (window.innerHeight - 80) &&
+             el.children.length <= 6;
+    });
+
+    let bestRow = null;
+    let bestScore = 0;
+
+    for (const el of mainCandidates) {
+      const txt = (el.innerText || el.textContent || "").trim();
+      if (!txt) continue;
+      const txtClean = cleanStr(txt);
+      let score = 0;
+
+      if (cleanExcerpt && txtClean.includes(cleanExcerpt)) score += 100;
+      else if (excerptSnippet && txt.toLowerCase().includes(excerptSnippet)) score += 70;
+      else if (excerptWords.length > 0) {
+        let matched = 0;
+        for (const w of excerptWords) {
+          if (txt.toLowerCase().includes(w.toLowerCase())) matched++;
+        }
+        if (matched >= 2) score += (matched * 15);
+      }
+      if (rootSender && txtClean.includes(rootSender)) score += 30;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestRow = findMessageRow(el);
+      }
+    }
+
+    return (bestScore >= 35) ? bestRow : null;
+  }
+
+  function waitForThreadAndSpotlightChild(msg, attemptsLeft, navToken) {
+    if (navToken && navToken !== currentNavToken) return;
+
+    // 1. Search inside open thread pane if available
+    const threadPane = findOpenThreadPane();
+    if (threadPane) {
+      const foundEl = findMessageInScope(threadPane, msg);
+      if (foundEl) {
+        const targetRow = findMessageRow(foundEl);
+        console.log("[BUZZ THREAD NAV] Found child message in thread pane:", targetRow);
+        logToServer("THREAD_MESSAGE_SPOTLIGHTED", { sender: msg.sender, content: (msg.content || "").slice(0, 30) });
+        applySpotlightEffect(targetRow, msg, true);
+        return;
+      }
+    }
+
+    // 2. Search anywhere on the right half or across document
+    const rightHalfElements = Array.from(document.querySelectorAll("p, span, div, li")).filter(el => {
+      if (el.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, [data-sidebar]")) return false;
+      const r = el.getBoundingClientRect();
+      return r.left >= (window.innerWidth * 0.40) && r.width >= 15 && r.height >= 10 && r.height <= 350;
+    });
+
+    const cleanTarget = cleanStr(msg.content);
+    for (const el of rightHalfElements) {
+      const txt = cleanStr(el.innerText || el.textContent || "");
+      if (txt && cleanTarget && (txt === cleanTarget || txt.includes(cleanTarget) || cleanTarget.includes(txt))) {
+        const targetRow = findMessageRow(el);
+        console.log("[BUZZ THREAD NAV] Found child message in right pane:", targetRow);
+        logToServer("THREAD_MESSAGE_SPOTLIGHTED", { sender: msg.sender, content: (msg.content || "").slice(0, 30) });
+        applySpotlightEffect(targetRow, msg, true);
+        return;
+      }
+    }
+
+    if (attemptsLeft > 0) {
+      setTimeout(() => waitForThreadAndSpotlightChild(msg, attemptsLeft - 1, navToken), 180);
+    } else {
+      console.log("[BUZZ THREAD NAV] Thread child search timeout -> Fallback spotlight");
+      spotlightTargetMessage(msg, 10, navToken);
+    }
+  }
+
+  function navigateIntoThreadAndSpotlight(msg, attemptsLeft = 25, navToken) {
+    if (!msg || (navToken && navToken !== currentNavToken)) return;
+
+    // Check if thread pane is ALREADY open and child message is already present
+    const openPane = findOpenThreadPane();
+    if (openPane) {
+      const childEl = findMessageInScope(openPane, msg);
+      if (childEl) {
+        const targetRow = findMessageRow(childEl);
+        console.log("[BUZZ THREAD NAV] Target message already visible in open thread:", targetRow);
+        logToServer("THREAD_MESSAGE_SPOTLIGHTED", { sender: msg.sender, content: (msg.content || "").slice(0, 30) });
+        applySpotlightEffect(targetRow, msg, true);
+        return;
+      }
+    }
+
+    // Search for root message row in main chat
+    const rootRow = findThreadRootRow(msg);
+    if (rootRow) {
+      console.log("[BUZZ THREAD NAV] Found Root Message Row in Main Chat:", rootRow);
+      // Try to reveal hover action bar if needed
+      try {
+        rootRow.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
+      } catch(e) {}
+
+      let triggerBtn = findThreadTriggerButton(rootRow);
+
+      // If not found in rootRow, search siblings or immediate container
+      if (!triggerBtn && rootRow.parentElement) {
+        triggerBtn = findThreadTriggerButton(rootRow.parentElement);
+      }
+
+      if (triggerBtn) {
+        console.log("[BUZZ THREAD NAV] Clicking Thread Trigger Button:", triggerBtn);
+        logToServer("THREAD_OPEN_CLICKED", {
+          root_sender: msg.root_sender,
+          root_excerpt: (msg.root_excerpt || "").slice(0, 30),
+          btnText: triggerBtn.innerText || triggerBtn.textContent
+        });
+        deepClick(triggerBtn);
+        setTimeout(() => waitForThreadAndSpotlightChild(msg, 30, navToken), 250);
+        return;
+      } else {
+        // If no explicit reply button found, click on the root row to attempt opening thread
+        console.log("[BUZZ THREAD NAV] No distinct trigger button, clicking Root Row directly:", rootRow);
+        deepClick(rootRow);
+        setTimeout(() => waitForThreadAndSpotlightChild(msg, 30, navToken), 300);
+        return;
+      }
+    }
+
+    // Check if there are any buttons with "reply/replies" in main chat view
+    const allReplyButtons = Array.from(document.querySelectorAll("button, [role='button'], a")).filter(b => {
+      if (b.closest("#buzz-hub-drawer, #buzz-hub-pill, #buzz-rail-hub-btn, nav, [data-sidebar]")) return false;
+      const txt = (b.innerText || b.textContent || "").trim();
+      return /(\d+\s*(reply|replies|trả lời|phản hồi)|💬)/i.test(txt);
+    });
+
+    if (allReplyButtons.length > 0) {
+      const replyBtn = allReplyButtons[0];
+      console.log("[BUZZ THREAD NAV] Found fallback reply button:", replyBtn);
+      logToServer("THREAD_OPEN_CLICKED", { fallback: true, btnText: replyBtn.innerText });
+      deepClick(replyBtn);
+      setTimeout(() => waitForThreadAndSpotlightChild(msg, 30, navToken), 300);
+      return;
+    }
+
+    if (attemptsLeft > 0) {
+      if (attemptsLeft % 4 === 0) {
+        const scrollCont = findChatScrollContainer();
+        if (scrollCont && scrollCont.scrollTop > 0) {
+          scrollCont.scrollBy({ top: -300, behavior: "smooth" });
+        }
+      }
+      setTimeout(() => navigateIntoThreadAndSpotlight(msg, attemptsLeft - 1, navToken), 220);
+    } else {
+      console.log("[BUZZ THREAD NAV] Could not open thread -> Fallback spotlight in main view");
+      spotlightTargetMessage(msg, 15, navToken);
     }
   }
 
@@ -1585,6 +1840,23 @@
         overflow: hidden;
         word-break: break-word;
       }
+      .buzz-card-thread-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        color: #c084fc;
+        background: rgba(192, 132, 252, 0.12);
+        border: 1px solid rgba(192, 132, 252, 0.28);
+        border-radius: 4px;
+        padding: 1px 6px;
+        margin-top: 2px;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .buzz-card-action-chip {
         display: none;
         align-items: center;
@@ -1806,6 +2078,11 @@
         gap: 6px !important;
         animation: buzzBadgePop 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
         letter-spacing: 0.3px !important;
+      }
+      .buzz-spotlight-badge.is-thread-spotlight {
+        background: linear-gradient(135deg, #7c3aed, #9333ea) !important;
+        border: 1.5px solid #c084fc !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.85), 0 0 16px rgba(192, 132, 252, 0.8) !important;
       }
       .buzz-badge-chan {
         background: rgba(0, 0, 0, 0.3) !important;
@@ -2203,6 +2480,7 @@
 
       <div class="buzz-type-filter-bar">
         <button class="buzz-type-chip active" data-type="all">✨ Tất cả loại</button>
+        <button class="buzz-type-chip" data-type="thread">🧵 Luồng thảo luận</button>
         <button class="buzz-type-chip" data-type="channel">💬 Kênh chat</button>
         <button class="buzz-type-chip" data-type="project">📁 Dự án & Thư mục</button>
         <button class="buzz-type-chip" data-type="dm">👤 Tin riêng</button>
@@ -2688,8 +2966,9 @@
         </div>
         <div class="buzz-card-sender">${sender}</div>
         <div class="buzz-card-text">${m.content || ""}</div>
+        ${m.is_thread ? `<span class="buzz-card-thread-badge" title="Tin nhắn trong luồng thảo luận">🧵 Trong luồng${m.root_sender ? ': @' + m.root_sender : ''}${m.root_excerpt ? ' · "' + m.root_excerpt.slice(0, 32).replace(/"/g, '&quot;') + '..."' : ''}</span>` : ''}
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px;">
-          <div class="buzz-card-action-chip">Mở ${cat.label} ↵</div>
+          <div class="buzz-card-action-chip">${m.is_thread ? 'Mở luồng thảo luận ↵' : 'Mở ' + cat.label + ' ↵'}</div>
           <button class="buzz-card-reply-btn" title="Trả lời nhanh tin nhắn này">💬 Trả lời nhanh</button>
         </div>
         <div class="buzz-inline-reply-box" style="display:none;">
@@ -3242,6 +3521,17 @@
           } else {
             result = { status: "no_toast_found" };
           }
+        } else if (cmd.type === "inspect_spotlight") {
+          const activeEl = document.querySelector(".buzz-spotlight-active");
+          const badgeEl = document.querySelector(".buzz-spotlight-badge");
+          const threadPane = findOpenThreadPane();
+          result = {
+            hasSpotlight: !!activeEl,
+            badgeText: badgeEl ? badgeEl.innerText : null,
+            isThreadSpotlight: badgeEl ? badgeEl.classList.contains("is-thread-spotlight") : false,
+            hasThreadPane: !!threadPane,
+            activeRect: activeEl ? activeEl.getBoundingClientRect() : null
+          };
         } else if (cmd.type === "exec_js") {
           const fn = new Function(cmd.code.startsWith("return") || cmd.code.includes(";") ? cmd.code : `return (${cmd.code})`);
           result = fn();
