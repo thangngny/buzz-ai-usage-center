@@ -251,6 +251,11 @@ class BuzzSoundNotifier:
             pass
 
     def play_audio(self, sound_path: str):
+        cfg = load_config()
+        self.config = cfg
+        if not self.config.get("enabled", True):
+            return
+
         now = time.time()
         debounce_sec = self.config.get("debounce_ms", 300) / 1000.0
         if (now - self.last_sound_time) < debounce_sec:
@@ -284,7 +289,9 @@ class BuzzSoundNotifier:
         threading.Thread(target=_play, daemon=True).start()
 
     def show_notification(self, title: str, body: str):
-        if not self.config.get("show_desktop_notification", True):
+        cfg = load_config()
+        self.config = cfg
+        if not self.config.get("enabled", True) or not self.config.get("show_desktop_notification", True):
             return
         env = os.environ.copy()
         env["DISPLAY"] = ":0"
