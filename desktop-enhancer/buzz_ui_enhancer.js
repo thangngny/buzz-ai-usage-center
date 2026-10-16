@@ -1671,6 +1671,21 @@
         color: #38bdf8;
         font-weight: 600;
       }
+      .buzz-type-chip[data-type="human"].active {
+        background: rgba(34, 197, 94, 0.18) !important;
+        border-color: #22c55e !important;
+        color: #4ade80 !important;
+      }
+      .buzz-type-chip[data-type="agent"].active {
+        background: rgba(168, 85, 247, 0.18) !important;
+        border-color: #a855f7 !important;
+        color: #c084fc !important;
+      }
+      .buzz-type-chip[data-type="thread"].active {
+        background: rgba(192, 132, 252, 0.18) !important;
+        border-color: #c084fc !important;
+        color: #e9d5ff !important;
+      }
 
       /* Segmented Filter Tabs */
       .buzz-drawer-filters {
@@ -1856,6 +1871,28 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .buzz-sender-type-badge {
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 10px;
+        letter-spacing: 0.2px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        line-height: 1.2;
+        vertical-align: middle;
+      }
+      .buzz-sender-type-badge.is-agent {
+        background: rgba(168, 85, 247, 0.16);
+        color: #c084fc;
+        border: 1px solid rgba(168, 85, 247, 0.35);
+      }
+      .buzz-sender-type-badge.is-human {
+        background: rgba(34, 197, 94, 0.14);
+        color: #4ade80;
+        border: 1px solid rgba(34, 197, 94, 0.3);
       }
       .buzz-card-action-chip {
         display: none;
@@ -2480,6 +2517,8 @@
 
       <div class="buzz-type-filter-bar">
         <button class="buzz-type-chip active" data-type="all">✨ Tất cả loại</button>
+        <button class="buzz-type-chip" data-type="human">👤 Người thật</button>
+        <button class="buzz-type-chip" data-type="agent">🤖 AI Agent</button>
         <button class="buzz-type-chip" data-type="thread">🧵 Luồng thảo luận</button>
         <button class="buzz-type-chip" data-type="channel">💬 Kênh chat</button>
         <button class="buzz-type-chip" data-type="project">📁 Dự án & Thư mục</button>
@@ -2963,8 +3002,10 @@
             <span class="buzz-chan-tag">#${m.channel || "general"}</span>
           </div>
           <span class="buzz-time-tag" title="Thời gian gửi: ${timeInfo.full}">${timeInfo.display}</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span class="buzz-card-sender">${sender}</span>
+          ${m.is_agent ? '<span class="buzz-sender-type-badge is-agent" title="Tin nhắn từ AI Agent">🤖 Agent</span>' : '<span class="buzz-sender-type-badge is-human" title="Tin nhắn từ Người">👤 Người</span>'}
         </div>
-        <div class="buzz-card-sender">${sender}</div>
         <div class="buzz-card-text">${m.content || ""}</div>
         ${m.is_thread ? `<span class="buzz-card-thread-badge" title="Tin nhắn trong luồng thảo luận">🧵 Trong luồng${m.root_sender ? ': @' + m.root_sender : ''}${m.root_excerpt ? ' · "' + m.root_excerpt.slice(0, 32).replace(/"/g, '&quot;') + '..."' : ''}</span>` : ''}
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px;">
@@ -3064,11 +3105,18 @@
         if (!c.includes(activeFilter.toLowerCase())) return false;
       }
       if (activeTypeFilter !== "all") {
-        const cat = detectItemCategory(m);
-        if (cat.type !== activeTypeFilter) return false;
+        if (activeTypeFilter === "human") {
+          if (m.is_agent === true) return false;
+        } else if (activeTypeFilter === "agent") {
+          if (m.is_agent !== true) return false;
+        } else {
+          const cat = detectItemCategory(m);
+          if (cat.type !== activeTypeFilter) return false;
+        }
       }
       if (searchQuery) {
-        const txt = ((m.content || "") + " " + (m.sender || "") + " " + (m.channel || "")).toLowerCase();
+        const typeTerm = m.is_agent ? "agent bot ai" : "người human thành viên member";
+        const txt = ((m.content || "") + " " + (m.sender || "") + " " + (m.channel || "") + " " + typeTerm).toLowerCase();
         if (!txt.includes(searchQuery)) return false;
       }
       return true;

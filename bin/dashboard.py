@@ -442,9 +442,12 @@ class UnifiedMessageHub:
         self.dm_channels: Dict[str, Dict[str, Any]] = {} # chid -> {relay, participants}
         self.messages: Dict[str, Dict[str, Any]] = {}
         self.seen_event_ids: Set[str] = set()
+        self.known_agent_names: Set[str] = set()
+        self.known_agent_pubkeys: Set[str] = set()
         self.running = True
 
         self.load_metadata()
+        self.load_known_agents()
         self.sync_all(initial=True)
 
         self.thread = threading.Thread(target=self._worker, daemon=True)
@@ -576,6 +579,54 @@ class UnifiedMessageHub:
 
         return False
 
+    def load_known_agents(self) -> None:
+        managed_file = os.path.join(APP_DATA_DIR, "agents", "managed-agents.json")
+        self.known_agent_names = set()
+        self.known_agent_pubkeys = set()
+        if os.path.exists(managed_file):
+            try:
+                with open(managed_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for a in data:
+                        if a.get("displayName"): self.known_agent_names.add(a["displayName"].lower().strip())
+                        if a.get("name"): self.known_agent_names.add(a["name"].lower().strip())
+                        for n in a.get("name_pool", []): self.known_agent_names.add(n.lower().strip())
+                        if a.get("pubkey"): self.known_agent_pubkeys.add(a["pubkey"].lower().strip())
+            except Exception:
+                pass
+
+    def is_agent_sender(self, sender: str, pubkey: str = "") -> bool:
+        s = (sender or "").lower().strip()
+        pk = (pubkey or "").lower().strip()
+
+        if pk and pk in self.known_agent_pubkeys:
+            return True
+        if s in self.known_agent_names:
+            return True
+
+        KNOWN_HUMANS = {
+            "ncthang", "ncthangdz", "gianam", "pham gia nam", "gia nam", "lina", "huyền", "huyen",
+            "leo", "hà giang", "ha giang", "đỗ ngọc linh", "do ngoc linh", "linh", "manh", "ducmanh",
+            "đức mạnh", "duc manh", "andy", "tunglam", "tung lam", "tùng lâm", "kao", "trầm cảm viên"
+        }
+        if s in KNOWN_HUMANS:
+            return False
+        if any(h in s for h in ("ncthang", "gianam", "pham gia nam", "lina", "huyền")):
+            return False
+
+        AGENT_KEYWORDS = (
+            "agent", "bot", "orchestrator", "assistant", "troly", "trợ lý", "agy", "codex",
+            "claude", "gemini", "gpt", "analyst", "strategist", "planner", "controller",
+            "producer", "writer", "studio", "fizz", "honey", "pollen", "antigravity",
+            "research", "qa &", "lead", "designer", "intelligence", "paid media", "seo &",
+            "crm &", "organic &", "analytics &", "sales enablement", "hermes", "manager", "strategy"
+        )
+        for kw in AGENT_KEYWORDS:
+            if kw in s:
+                return True
+
+        return False
+
     def add_message(self, eid: str, kind: int, pubkey: str, content: str, chid: str, scope: str, created_at: Any, is_live: bool = False, tags: Optional[List[Any]] = None) -> bool:
         if not eid or not content:
             return False
@@ -649,6 +700,9 @@ class UnifiedMessageHub:
         norm_ts = self.normalize_timestamp(created_at)
         lt = time.localtime(norm_ts)
 
+        is_agent = self.is_agent_sender(sender, pubkey)
+        sender_type = "agent" if is_agent else "human"
+
         item = {
             "id": eid,
             "time": time.strftime("%H:%M · %d/%m", lt),
@@ -659,6 +713,8 @@ class UnifiedMessageHub:
             "channel_id": chid,
             "sender": sender,
             "pubkey": pubkey,
+            "is_agent": is_agent,
+            "sender_type": sender_type,
             "is_dm": is_dm,
             "is_mention": is_mention,
             "is_thread": is_thread,
