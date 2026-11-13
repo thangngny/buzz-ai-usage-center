@@ -44,9 +44,10 @@ class V2FailClosedTests(unittest.TestCase):
         run.return_value = mock.Mock(returncode=0, stdout="not-json", stderr="")
         self.assertIsNone(self.quota.fetch_linux_via_wsl())
 
+    @mock.patch("paths.wsl_available", return_value=True)
     @mock.patch("paths.windows_codex_homes", return_value=[])
     @mock.patch("paths.in_windows", return_value=True)
-    def test_v2_collect_aborts_instead_of_using_windows_only(self, _win, _homes):
+    def test_v2_collect_aborts_instead_of_using_windows_only(self, _win, _homes, _wsl):
         with mock.patch.object(self.quota, "fetch_linux_via_wsl", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "keeping last-known-good"):
                 self.quota.collect_all()
