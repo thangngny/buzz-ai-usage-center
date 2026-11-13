@@ -1823,12 +1823,19 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 """)
                 ev_verified = cur.fetchone()[0] or 0
 
-                # 3. Real deduped: distinct entities checked for dedupe
+                # 3. Real deduped: distinct entities that actually cleared dedupe (V8-007: exclude CHECK_FAILED/error outcomes)
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
                     WHERE event_type = 'lead.crm_dedupe_completed'
                       AND environment != 'mock'
                       AND synthetic = 0
+                      AND (
+                          json_extract(payload_json, '$.outcome') IN ('SUCCESS', 'CLEARED')
+                          OR (
+                              json_extract(payload_json, '$.dedupe_status') IN ('NOT_FOUND_VERIFIED', 'NOT_FOUND_IN_CHECKED_SCOPE', 'NOT_FOUND_IN_VERIFIED_SEARCH_SCOPE')
+                              AND COALESCE(json_extract(payload_json, '$.dedupe_status'), '') NOT IN ('CHECK_FAILED', 'STALE_RESULT')
+                          )
+                      )
                 """)
                 ev_deduped = cur.fetchone()[0] or 0
 
@@ -1868,7 +1875,7 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 """)
                 ev_deals = cur.fetchone()[0] or 0
 
-                if ev_raw > 0 or ev_verified > 0 or ev_staged > 0:
+                if ev_raw > 0 or ev_verified > 0 or ev_deduped > 0 or ev_scored > 0 or ev_staged > 0 or ev_deals > 0:
                     real_raw_discovered = ev_raw
                     real_verified_facts = ev_verified
                     real_deduped = ev_deduped
@@ -1949,8 +1956,10 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
             err_msg = str(op_err).lower()
             if "locked" in err_msg or "busy" in err_msg:
                 data_status = "DATABASE_LOCKED"
+            elif "no such table" in err_msg or "no such column" in err_msg:
+                data_status = "SCHEMA_MISMATCH"
             else:
-                data_status = "SOURCE_ERROR"
+                data_status = "SOURCE_UNAVAILABLE"
             error_detail = str(op_err)
         except Exception as ex:
             data_status = "SOURCE_ERROR"
@@ -2009,7 +2018,8 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
     return {
         "mode": "REAL",
         "is_demo": False,
-        "status": "ACTIVE_LEDGER" if has_real_records else "NO_DATA",
+        "status": data_status if data_status != "OK" else ("ACTIVE_LEDGER" if has_real_records else "NO_DATA"),
+        "error_detail": error_detail,
         "funnel_stages": [
             {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": total_raw, "pct": 100.0 if total_raw > 0 else 0.0, "color": "var(--primary)"},
             {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": verified, "pct": round(verified/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--primary-hover)"},
@@ -3522,7 +3532,8 @@ class Handler(BaseHTTPRequestHandler):
         if auth_token or auth_required:
             auth_header = self.headers.get("Authorization", "") or self.headers.get("X-Buzz-Token", "")
             token_val = auth_header[7:].strip() if auth_header.startswith("Bearer ") else auth_header.strip()
-            if not token_val or token_val != auth_token:
+            import hmac
+            if not token_val or not hmac.compare_digest(str(token_val), str(auth_token)):
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Bearer realm="Buzz GTM OS"')
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3891,7 +3902,7 @@ class DashboardServer(ThreadingHTTPServer):
     bind chung cong, nen watchdog (health cham > 3s) de ra nhieu dashboard, moi
     cai tu chay quota/collector ghi usage.db."""
 
-    allow_reuse_address = True
+    allow_reuse_address = False
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
