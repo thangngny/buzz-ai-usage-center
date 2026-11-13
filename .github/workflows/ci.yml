@@ -29,3 +29,13 @@ jobs:
       - name: Verify Code Compilation
         run: |
           python -m compileall bin lib
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest tzdata
+
+      - name: Run Behavioral & Unit Test Suites
+        run: |
+          python -m pytest -v tests/
+

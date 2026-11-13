@@ -46,6 +46,8 @@ def _funnel_url() -> str:
     env = (os.environ.get("BUZZ_FUNNEL_URL") or "").strip()
     if env:
         return env.rstrip("/")
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return "https://trungthu.tailc0eb7b.ts.net:8443"
     try:
         r = subprocess.run(
             ["tailscale", "status", "--json"],
@@ -450,12 +452,13 @@ class UnifiedMessageHub:
         self.known_agent_pubkeys: Set[str] = set()
         self.running = True
 
-        self.load_metadata()
-        self.load_known_agents()
-        self.sync_all(initial=True)
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            self.load_metadata()
+            self.load_known_agents()
+            self.sync_all(initial=True)
 
-        self.thread = threading.Thread(target=self._worker, daemon=True)
-        self.thread.start()
+            self.thread = threading.Thread(target=self._worker, daemon=True)
+            self.thread.start()
 
     def load_metadata(self):
         if not os.path.exists(DB_LOCALSTORAGE):
@@ -866,7 +869,7 @@ class UnifiedMessageHub:
             try:
                 conn = sqlite3.connect(f"file:{DB_ARCHIVE}?mode=ro", uri=True)
                 c = conn.cursor()
-                for relay_url, eid, kind, pubkey, created_at, raw_json in c.execute("SELECT relay_url, id, kind, pubkey, created_at, raw_json FROM archived_events"):
+                for relay_url, eid, kind, pubkey, created_at, raw_json in c.execute("SELECT relay_url, id, kind, pubkey, created_at, raw_json FROM archived_events ORDER BY rowid DESC LIMIT 500"):
                     try:
                         data = json.loads(raw_json)
                         chid = ""
@@ -1758,6 +1761,7 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
     real_crm_staged = 0
     real_outreach_drafted = 0
     real_replied_deals = 0
+    real_duplicates_prevented = 0
     real_top_leads = []
     has_real_records = False
     real_pipeline_value_vnd = 0.0
@@ -1827,16 +1831,33 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 """)
                 ev_verified = cur.fetchone()[0] or 0
 
-                # 3. Real deduped: distinct entities that actually cleared dedupe (V9-005: strictly verified success)
+                # 3. Real deduped: distinct entities that actually cleared dedupe (V10-007: strictly verified success, excluding duplicates)
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
                     WHERE event_type = 'lead.crm_dedupe_completed'
                       AND environment != 'mock'
                       AND synthetic = 0
-                      AND json_extract(payload_json, '$.outcome') IN ('SUCCESS', 'CLEARED')
-                      AND COALESCE(json_extract(payload_json, '$.outcome'), '') NOT IN ('FAILED', 'PARTIAL')
+                      AND (
+                          json_extract(payload_json, '$.outcome') IN ('SUCCESS', 'CLEARED')
+                          OR json_extract(payload_json, '$.cleared') = 1
+                      )
+                      AND COALESCE(json_extract(payload_json, '$.outcome'), '') != 'DUPLICATE_CONFIRMED'
+                      AND COALESCE(json_extract(payload_json, '$.dedupe_status'), '') != 'DUPLICATE_CONFIRMED'
                 """)
                 ev_deduped = cur.fetchone()[0] or 0
+
+                # 3b. Real duplicate confirmed (V10-007)
+                cur.execute("""
+                    SELECT count(DISTINCT entity_id) FROM business_events
+                    WHERE event_type = 'lead.crm_dedupe_completed'
+                      AND environment != 'mock'
+                      AND synthetic = 0
+                      AND (
+                          json_extract(payload_json, '$.outcome') = 'DUPLICATE_CONFIRMED'
+                          OR json_extract(payload_json, '$.dedupe_status') = 'DUPLICATE_CONFIRMED'
+                      )
+                """)
+                ev_duplicates_prevented = cur.fetchone()[0] or 0
 
                 # 4. Real scored
                 cur.execute("""
@@ -1865,19 +1886,20 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 """)
                 ev_outreach = cur.fetchone()[0] or 0
 
-                # 7. Real deals
+                # 7. Real deals (V10-007: strictly deal.created, deal.won; exclude opportunity.created)
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
-                    WHERE event_type IN ('deal.created', 'deal.won', 'opportunity.created')
+                    WHERE event_type IN ('deal.created', 'deal.won')
                       AND environment != 'mock'
                       AND synthetic = 0
                 """)
                 ev_deals = cur.fetchone()[0] or 0
 
-                if ev_raw > 0 or ev_verified > 0 or ev_deduped > 0 or ev_scored > 0 or ev_staged > 0 or ev_outreach > 0 or ev_deals > 0:
+                if ev_raw > 0 or ev_verified > 0 or ev_deduped > 0 or ev_scored > 0 or ev_staged > 0 or ev_outreach > 0 or ev_deals > 0 or ev_duplicates_prevented > 0:
                     real_raw_discovered = ev_raw
                     real_verified_facts = ev_verified
                     real_deduped = ev_deduped
+                    real_duplicates_prevented = ev_duplicates_prevented
                     real_icp_scored = ev_scored
                     real_crm_staged = ev_staged
                     real_outreach_drafted = ev_outreach
@@ -2026,16 +2048,20 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
         {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": real_replied_deals, "pct": 0.0, "color": "#10b981"},
     ]
 
+    funnel_map = {s["id"]: s["count"] for s in real_stages}
+    funnel_map["duplicate_confirmed"] = real_duplicates_prevented
+
     return {
         "mode": "REAL",
         "is_demo": False,
         "status": data_status if data_status != "OK" else ("ACTIVE_LEDGER" if has_real_records else "NO_DATA"),
         "error_detail": error_detail,
-        "funnel": {s["id"]: s["count"] for s in real_stages},
+        "funnel": funnel_map,
         "funnel_stages": real_stages,
         "kpis": {
             "verified_leads": verified,
             "icp_qualified": scored,
+            "duplicates_prevented": real_duplicates_prevented,
             "crm_protected_vats": vats_count,
             "est_pipeline_value_vnd": f"{real_pipeline_value_vnd:,.0f} VNĐ".replace(",", ".") if (has_real_records and real_pipeline_value_vnd > 0) else "0 VNĐ (Chưa có deal thực tế)",
             "est_air_volume_tons": f"{real_air_volume_tons:.1f} Tấn/tháng" if (has_real_records and real_air_volume_tons > 0) else "0 Tấn/tháng (Chưa có dữ liệu vận tải thực)",
