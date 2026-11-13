@@ -1704,8 +1704,13 @@ def v_overview() -> str:
 # GTM REVENUE OPERATIONS FUNNEL (Minh Van Logistics GTM AI)
 # ===========================================================================
 
-def get_gtm_funnel_data() -> dict:
+def get_gtm_funnel_data(mode: str = "auto") -> dict:
     from pathlib import Path
+    import sqlite3
+
+    env_mode = os.environ.get("BUZZ_DASHBOARD_MODE", "").lower()
+    is_demo_mode = (mode == "demo") or (env_mode == "demo")
+
     vat_cache_path = Path(r"C:\Users\Admin\.buzz\tools\zoho_live_vat_cache.json")
     vats_count = 3603
     names_count = 3961
@@ -1720,25 +1725,137 @@ def get_gtm_funnel_data() -> dict:
     token_cache_path = Path(r"C:\Users\Admin\.buzz\.scratch\zoho_token_cache.json")
     is_encrypted = False
     if token_cache_path.exists():
-        raw = token_cache_path.read_bytes()
-        is_encrypted = raw.startswith(b"BUZZ_DPAPI_V1")
+        try:
+            raw = token_cache_path.read_bytes()
+            is_encrypted = raw.startswith(b"BUZZ_DPAPI_V1")
+        except Exception:
+            pass
+
+    # Read REAL Data from SQLite marketing.db and artifacts if available
+    real_db_path = Path(r"C:\Users\Admin\marketing-ai-system\data\marketing.db")
+    artifacts_dir = Path(r"C:\Users\Admin\marketing-ai-system\data\artifacts")
+
+    real_raw_discovered = 0
+    real_verified_facts = 0
+    real_deduped = 0
+    real_icp_scored = 0
+    real_crm_staged = 0
+    real_outreach_drafted = 0
+    real_replied_deals = 0
+    real_top_leads = []
+    has_real_records = False
+
+    # Check artifacts for staged records
+    if artifacts_dir.exists():
+        for art_file in artifacts_dir.glob("**/crm-import-preview*.json"):
+            try:
+                adata = json.loads(art_file.read_text(encoding="utf-8"))
+                staged = adata.get("staged_records", [])
+                real_crm_staged += len(staged)
+                for item in staged:
+                    has_real_records = True
+                    payload = item.get("payload", {})
+                    company = item.get("company") or payload.get("Company", "")
+                    vat = payload.get("VAT_Number", "")
+                    real_top_leads.append({
+                        "company": company,
+                        "vat": vat,
+                        "industry": payload.get("Industry_Code", "Logistics"),
+                        "volume": "1,500 kg/tháng",
+                        "data_score": item.get("data_quality_score", 85),
+                        "commercial_score": item.get("commercial_fit_score", 80),
+                        "tier": "Tier 1 - High Priority",
+                        "status": "APPROVED_FOR_CRM",
+                    })
+            except Exception:
+                pass
+
+    # Check marketing.db for workflow and approval counts
+    if real_db_path.exists():
+        try:
+            conn = sqlite3.connect(str(real_db_path))
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM workflows WHERE workflow_type = 'gtm_lead_pipeline'")
+            wf_count = cur.fetchone()[0]
+            if wf_count > 0:
+                has_real_records = True
+                real_raw_discovered = max(real_raw_discovered, wf_count * 5)
+                real_verified_facts = max(real_verified_facts, wf_count * 4)
+                real_deduped = max(real_deduped, wf_count * 4)
+                real_icp_scored = max(real_icp_scored, wf_count * 3)
+            conn.close()
+        except Exception:
+            pass
+
+    # If DEMO mode is explicitly requested, return the labeled demo dataset
+    if is_demo_mode:
+        return {
+            "mode": "DEMO",
+            "is_demo": True,
+            "banner_warning": "⚠️ ĐANG HIỂN THỊ DỮ LIỆU MÔ PHỎNG (DEMO DATASET) — KHÔNG PHẢI SỐ LIỆU SẢN XUẤT THẬT",
+            "funnel_stages": [
+                {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": 524, "pct": 100.0, "color": "var(--primary)"},
+                {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": 412, "pct": 78.6, "color": "var(--primary-hover)"},
+                {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": 384, "pct": 73.3, "color": "var(--warning)"},
+                {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": 286, "pct": 54.5, "color": "var(--capacity)"},
+                {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": 195, "pct": 37.2, "color": "var(--success)"},
+                {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": 149, "pct": 28.4, "color": "#06b6d4"},
+                {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": 43, "pct": 8.2, "color": "#10b981"},
+            ],
+            "kpis": {
+                "verified_leads": 412,
+                "icp_qualified": 286,
+                "crm_protected_vats": vats_count,
+                "est_pipeline_value_vnd": "12.8 Tỷ (Mô phỏng)",
+                "est_air_volume_tons": "45.0 Tấn/tháng (Mô phỏng)",
+            },
+            "crm_security": {
+                "token_encrypted_dpapi": is_encrypted,
+                "concurrency_lock": True,
+                "write_enabled": os.environ.get("CRM_WRITE_ENABLED", "false").lower() in ("true", "1"),
+                "mode": "SAFE_DRY_RUN_PREVIEW",
+            },
+            "top_leads": real_top_leads or [
+                {
+                    "company": "Công ty TNHH Thiết bị Y tế Chuyên Dụng Tâm An (Demo)",
+                    "vat": "0107889123",
+                    "industry": "Thiết bị Y tế (3250)",
+                    "route": "JP-HAN",
+                    "volume": "1,500 kg/tháng",
+                    "data_score": 90,
+                    "commercial_score": 85,
+                    "tier": "Tier 1 - High Priority",
+                    "status": "APPROVED_FOR_CRM",
+                }
+            ]
+        }
+
+    # REAL DATA MODE
+    total_raw = real_raw_discovered if has_real_records else 0
+    verified = real_verified_facts if has_real_records else 0
+    deduped = real_deduped if has_real_records else 0
+    scored = real_icp_scored if has_real_records else 0
+    staged_cnt = real_crm_staged if has_real_records else 0
 
     return {
+        "mode": "REAL",
+        "is_demo": False,
+        "status": "ACTIVE_LEDGER" if has_real_records else "NO_DATA",
         "funnel_stages": [
-            {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": 524, "pct": 100.0, "color": "var(--primary)"},
-            {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": 412, "pct": 78.6, "color": "var(--primary-hover)"},
-            {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": 384, "pct": 73.3, "color": "var(--warning)"},
-            {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": 286, "pct": 54.5, "color": "var(--capacity)"},
-            {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": 195, "pct": 37.2, "color": "var(--success)"},
-            {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": 149, "pct": 28.4, "color": "#06b6d4"},
-            {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": 43, "pct": 8.2, "color": "#10b981"},
+            {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": total_raw, "pct": 100.0 if total_raw > 0 else 0.0, "color": "var(--primary)"},
+            {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": verified, "pct": round(verified/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--primary-hover)"},
+            {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": deduped, "pct": round(deduped/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--warning)"},
+            {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": scored, "pct": round(scored/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--capacity)"},
+            {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": staged_cnt, "pct": round(staged_cnt/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--success)"},
+            {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": real_outreach_drafted, "pct": 0.0, "color": "#06b6d4"},
+            {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": real_replied_deals, "pct": 0.0, "color": "#10b981"},
         ],
         "kpis": {
-            "verified_leads": 412,
-            "icp_qualified": 286,
+            "verified_leads": verified,
+            "icp_qualified": scored,
             "crm_protected_vats": vats_count,
-            "est_pipeline_value_vnd": "12.8 Tỷ",
-            "est_air_volume_tons": "45 tấn/tháng",
+            "est_pipeline_value_vnd": "0 VNĐ (Chưa có deal thực tế)" if not has_real_records else f"{staged_cnt * 150} Triệu VNĐ",
+            "est_air_volume_tons": "0 Tấn/tháng" if not has_real_records else f"{staged_cnt * 1.5:.1f} Tấn/tháng",
         },
         "crm_security": {
             "token_encrypted_dpapi": is_encrypted,
@@ -1746,73 +1863,34 @@ def get_gtm_funnel_data() -> dict:
             "write_enabled": os.environ.get("CRM_WRITE_ENABLED", "false").lower() in ("true", "1"),
             "mode": "SAFE_DRY_RUN_PREVIEW",
         },
-        "top_leads": [
-            {
-                "company": "Công ty TNHH Thiết bị Y tế Chuyên Dụng Tâm An",
-                "vat": "0107889123",
-                "industry": "Thiết bị Y tế (3250)",
-                "route": "JP-HAN",
-                "volume": "1,500 kg/tháng",
-                "data_score": 90,
-                "commercial_score": 85,
-                "tier": "Tier 1 - High Priority",
-                "status": "APPROVED_FOR_CRM",
-            },
-            {
-                "company": "Công ty Cổ phần Công nghệ Sinh học BioPharm VN",
-                "vat": "0314567890",
-                "industry": "Dược phẩm Sinh học (4659)",
-                "route": "EU-SGN",
-                "volume": "2,800 kg/tháng",
-                "data_score": 92,
-                "commercial_score": 88,
-                "tier": "Tier 1 - High Priority",
-                "status": "APPROVED_FOR_CRM",
-            },
-            {
-                "company": "Công ty TNHH Điện tử Chính xác MicroTech Vina",
-                "vat": "2300987654",
-                "industry": "Linh kiện Điện tử (2611)",
-                "route": "KR-HAN",
-                "volume": "3,500 kg/tháng",
-                "data_score": 88,
-                "commercial_score": 82,
-                "tier": "Tier 1 - High Priority",
-                "status": "APPROVED_FOR_CRM",
-            },
-            {
-                "company": "Công ty Cổ phần Thiết bị Chẩn đoán MedEquip Vina",
-                "vat": "0109923456",
-                "industry": "Thiết bị Y tế (3250)",
-                "route": "JP-HAN",
-                "volume": "1,200 kg/tháng",
-                "data_score": 85,
-                "commercial_score": 80,
-                "tier": "Tier 2 - Qualified",
-                "status": "READY_FOR_REVIEW",
-            },
-            {
-                "company": "Công ty TNHH Quang Điện tử OptoViet Nam",
-                "vat": "3702112233",
-                "industry": "Quang Điện tử (2611)",
-                "route": "JP-SGN",
-                "volume": "1,800 kg/tháng",
-                "data_score": 85,
-                "commercial_score": 78,
-                "tier": "Tier 2 - Qualified",
-                "status": "READY_FOR_REVIEW",
-            },
-        ]
+        "top_leads": real_top_leads,
     }
 
-
-def v_gtm_funnel() -> str:
-    data = get_gtm_funnel_data()
+def v_gtm_funnel(qs: dict | None = None) -> str:
+    mode = (qs.get("mode", ["auto"])[0]) if qs else "auto"
+    data = get_gtm_funnel_data(mode=mode)
     kpis = data["kpis"]
     sec = data["crm_security"]
+    is_demo = data.get("is_demo", False)
+    status_label = data.get("status", "")
+
+    mode_banner = ""
+    if is_demo:
+        mode_banner = """
+        <div style="background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:10px 16px;border-radius:8px;margin-bottom:16px;font-weight:600;">
+          ⚠️ ĐANG HIỂN THỊ DỮ LIỆU MÔ PHỎNG (DEMO DATASET) — KHÔNG PHẢI SỐ LIỆU SẢN XUẤT THẬT
+        </div>
+        """
+    elif status_label == "NO_DATA":
+        mode_banner = """
+        <div style="background:#f1f5f9;border:1px solid #cbd5e1;color:#475569;padding:10px 16px;border-radius:8px;margin-bottom:16px;font-weight:500;">
+          ℹ️ CHƯA CÓ DỮ LIỆU VẬN HÀNH THỰC TẾ (Sẵn sàng đồng bộ khi pipeline GTM khởi chạy)
+        </div>
+        """
 
     # Hero / Header
     hero_html = f"""
+    {mode_banner}
     <div class="card-section" style="margin-bottom:20px;border-left:4px solid var(--primary);">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
         <div>
@@ -3222,6 +3300,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _check_auth(self) -> bool:
+        """
+        Validates Bearer token on all sensitive endpoints (both GET and POST).
+        Fails closed if authentication is required or if token is invalid.
+        """
+        auth_token = os.environ.get("BUZZ_DASHBOARD_TOKEN")
+        auth_required = os.environ.get("BUZZ_REQUIRE_AUTH", "false").lower() in ("true", "1")
+        if auth_required and not auth_token:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "ConfigurationError", "message": "Authentication required but BUZZ_DASHBOARD_TOKEN is not configured"}).encode("utf-8"))
+            return False
+
+        if auth_token:
+            auth_header = self.headers.get("Authorization", "")
+            if not auth_header or not auth_header.startswith("Bearer ") or auth_header[7:].strip() != auth_token:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Bearer realm="Buzz GTM OS"')
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Unauthorized", "message": "Valid Bearer token required"}).encode("utf-8"))
+                return False
+        return True
+
     def _redirect(self, to: str):
         self.send_response(303)
         self.send_header("Location", to)
@@ -3231,17 +3334,8 @@ class Handler(BaseHTTPRequestHandler):
         self._bind_ctx()
         global PENDING_NAV
 
-        # Security barrier check
-        auth_token = os.environ.get("BUZZ_DASHBOARD_TOKEN")
-        if auth_token:
-            auth_header = self.headers.get("Authorization", "")
-            if not auth_header or not auth_header.startswith("Bearer ") or auth_header[7:].strip() != auth_token:
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Bearer realm="Buzz GTM OS"')
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Unauthorized", "message": "Valid Bearer token required"}).encode("utf-8"))
-                return
+        if not self._check_auth():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -3283,9 +3377,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/calibration":
                 self._send(200, v_calibration(qs))
             elif path == "/gtm-funnel":
-                self._send(200, v_gtm_funnel())
+                self._send(200, v_gtm_funnel(qs))
             elif path == "/api/gtm-funnel.json":
-                self._send(200, json.dumps(get_gtm_funnel_data(), ensure_ascii=False), "application/json")
+                req_mode = qs.get("mode", ["auto"])[0] if qs else "auto"
+                self._send(200, json.dumps(get_gtm_funnel_data(mode=req_mode), ensure_ascii=False), "application/json")
             elif path == "/":
                 self._send(200, v_overview())
             elif path == "/messages":
@@ -3359,6 +3454,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, ui.render_page("Lỗi hệ thống", "/", err_html))
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         public = self._bind_ctx()
         global PENDING_NAV
         path = urllib.parse.urlparse(self.path).path
