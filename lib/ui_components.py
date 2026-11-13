@@ -1229,6 +1229,7 @@ ICON_REFRESH = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stro
 ICON_COPY = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>'
 ICON_MOON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>'
 ICON_SUN = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>'
+ICON_FUNNEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>'
 
 
 def pct_color(p: float) -> str:
@@ -1618,6 +1619,9 @@ def render_page(title: str, active_route: str, body_html: str, subtitle: str = "
         {nav_link("/users", i18n.t("nav.users"), ICON_USERS)}
         {nav_link("/agents", i18n.t("nav.agents"), ICON_BOT)}
         
+        <div class="nav-section-title">GTM Revenue Operations</div>
+        {nav_link("/gtm-funnel", "Phễu GTM Sales", ICON_FUNNEL)}
+
         <div class="nav-section-title">Phân tích & Giám sát</div>
         {nav_link("/calibration", i18n.t("nav.calibration"), ICON_SCALE)}
         {nav_link("/alerts", i18n.t("nav.alerts"), ICON_ALERT, unread_alerts)}
