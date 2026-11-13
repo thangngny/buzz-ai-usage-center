@@ -1711,7 +1711,8 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
     env_mode = os.environ.get("BUZZ_DASHBOARD_MODE", "").lower()
     is_demo_mode = (mode == "demo") or (env_mode == "demo")
 
-    vat_cache_path = Path(r"C:\Users\Admin\.buzz\tools\zoho_live_vat_cache.json")
+    buzz_dir = Path(os.environ.get("BUZZ_HOME", str(Path.home() / ".buzz")))
+    vat_cache_path = Path(os.environ.get("BUZZ_VAT_CACHE", str(buzz_dir / "tools" / "zoho_live_vat_cache.json")))
     vats_count = 3603
     names_count = 3961
     if vat_cache_path.exists():
@@ -1722,7 +1723,7 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
         except Exception:
             pass
 
-    token_cache_path = Path(r"C:\Users\Admin\.buzz\.scratch\zoho_token_cache.json")
+    token_cache_path = Path(os.environ.get("BUZZ_TOKEN_CACHE", str(buzz_dir / ".scratch" / "zoho_token_cache.json")))
     is_encrypted = False
     if token_cache_path.exists():
         try:
@@ -1731,9 +1732,20 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
         except Exception:
             pass
 
-    # Read REAL Data from SQLite marketing.db and artifacts if available
-    real_db_path = Path(r"C:\Users\Admin\marketing-ai-system\data\marketing.db")
-    artifacts_dir = Path(r"C:\Users\Admin\marketing-ai-system\data\artifacts")
+    # Dynamic workspace discovery for marketing-ai-system
+    marketing_dir_env = os.environ.get("BUZZ_MARKETING_AI_SYSTEM_DIR")
+    if marketing_dir_env and Path(marketing_dir_env).exists():
+        marketing_base = Path(marketing_dir_env)
+    else:
+        curr_file = Path(globals().get("__file__", "")).resolve() if globals().get("__file__") else Path.cwd()
+        candidate_sibling = curr_file.parent.parent.parent / "marketing-ai-system"
+        if candidate_sibling.exists():
+            marketing_base = candidate_sibling
+        else:
+            marketing_base = Path.home() / "marketing-ai-system"
+
+    real_db_path = Path(os.environ.get("BUZZ_MARKETING_DB", str(marketing_base / "data" / "marketing.db")))
+    artifacts_dir = marketing_base / "data" / "artifacts"
 
     real_raw_discovered = 0
     real_verified_facts = 0
@@ -1744,6 +1756,8 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
     real_replied_deals = 0
     real_top_leads = []
     has_real_records = False
+    real_pipeline_value_vnd = 0.0
+    real_air_volume_tons = 0.0
 
     # Check artifacts for staged records
     if artifacts_dir.exists():
@@ -1770,19 +1784,50 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
             except Exception:
                 pass
 
-    # Check marketing.db for workflow and approval counts
+    # Aggregate real distinct records and events from SQLite marketing.db
     if real_db_path.exists():
         try:
             conn = sqlite3.connect(str(real_db_path))
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM workflows WHERE workflow_type = 'gtm_lead_pipeline'")
-            wf_count = cur.fetchone()[0]
-            if wf_count > 0:
+
+            # 1. Distinct raw discovered leads from canonical_records
+            cur.execute("SELECT count(DISTINCT id) FROM canonical_records WHERE entity_type IN ('Lead', 'Contact', 'Company')")
+            db_raw_leads = cur.fetchone()[0] or 0
+
+            # 2. Real Deals from canonical_records
+            cur.execute("SELECT count(*), COALESCE(SUM(json_extract(payload_json, '$.amount')), 0) FROM canonical_records WHERE entity_type = 'Deal' AND synthetic = 0")
+            deal_row = cur.fetchone()
+            real_deals_count = deal_row[0] or 0
+            real_deals_amount = float(deal_row[1] or 0.0)
+
+            # 3. Real completed pipeline steps
+            cur.execute("SELECT name, count(*) FROM workflow_steps WHERE state = 'DONE' GROUP BY name")
+            step_counts = dict(cur.fetchall())
+            search_done = step_counts.get("search", 0)
+            dedupe_done = step_counts.get("dedupe", 0)
+            score_done = step_counts.get("score", 0)
+            draft_done = step_counts.get("draft_emails", 0) + step_counts.get("create_drafts", 0)
+            approve_done = step_counts.get("approve_drafts", 0)
+
+            # Approved staged items from approvals table
+            cur.execute("SELECT count(*) FROM approvals WHERE status = 'APPROVED'")
+            approved_count = cur.fetchone()[0] or 0
+
+            # Verified leads (authoritative, high confidence, non-synthetic)
+            cur.execute("SELECT count(*) FROM canonical_records WHERE entity_type IN ('Lead', 'Company') AND synthetic = 0 AND confidence >= 0.95")
+            db_verified_count = cur.fetchone()[0] or 0
+
+            if db_raw_leads > 0 or search_done > 0 or real_deals_count > 0:
                 has_real_records = True
-                real_raw_discovered = max(real_raw_discovered, wf_count * 5)
-                real_verified_facts = max(real_verified_facts, wf_count * 4)
-                real_deduped = max(real_deduped, wf_count * 4)
-                real_icp_scored = max(real_icp_scored, wf_count * 3)
+                real_raw_discovered = max(db_raw_leads, search_done)
+                real_verified_facts = max(real_verified_facts, db_verified_count)
+                real_deduped = max(real_deduped, dedupe_done)
+                real_icp_scored = max(real_icp_scored, score_done)
+                real_crm_staged = max(real_crm_staged, approved_count, approve_done)
+                real_outreach_drafted = max(real_outreach_drafted, draft_done)
+                real_replied_deals = max(real_replied_deals, real_deals_count)
+                real_pipeline_value_vnd = real_deals_amount
+
             conn.close()
         except Exception:
             pass
@@ -1854,8 +1899,8 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
             "verified_leads": verified,
             "icp_qualified": scored,
             "crm_protected_vats": vats_count,
-            "est_pipeline_value_vnd": "0 VNĐ (Chưa có deal thực tế)" if not has_real_records else f"{staged_cnt * 150} Triệu VNĐ",
-            "est_air_volume_tons": "0 Tấn/tháng" if not has_real_records else f"{staged_cnt * 1.5:.1f} Tấn/tháng",
+            "est_pipeline_value_vnd": f"{real_pipeline_value_vnd:,.0f} VNĐ".replace(",", ".") if (has_real_records and real_pipeline_value_vnd > 0) else "0 VNĐ (Chưa có deal thực tế)",
+            "est_air_volume_tons": f"{real_air_volume_tons:.1f} Tấn/tháng" if (has_real_records and real_air_volume_tons > 0) else "0 Tấn/tháng (Chưa có dữ liệu vận tải thực)",
         },
         "crm_security": {
             "token_encrypted_dpapi": is_encrypted,
@@ -3342,10 +3387,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/deliverables/"):
                 fname = os.path.basename(urllib.parse.unquote(path[14:]))
+                bdir = Path(os.environ.get("BUZZ_HOME", str(Path.home() / ".buzz")))
                 search_dirs = [
-                    r"C:\Users\Admin\.buzz\OUTBOX",
-                    r"C:\Users\Admin\.buzz\videos",
-                    r"C:\Users\Admin\.buzz\PLANS"
+                    str(bdir / "OUTBOX"),
+                    str(bdir / "videos"),
+                    str(bdir / "PLANS")
                 ]
                 found_path = None
                 for sdir in search_dirs:
