@@ -24,7 +24,12 @@ import sqlite3
 import urllib.parse
 from typing import Any, Dict, List, Optional
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+    ICT = ZoneInfo("Asia/Ho_Chi_Minh")
+except Exception:
+    import datetime as _dt
+    ICT = _dt.timezone(_dt.timedelta(hours=7))
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
 
@@ -35,7 +40,6 @@ import ui_components as ui  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8787
-ICT = ZoneInfo("Asia/Ho_Chi_Minh")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _funnel_url() -> str:
     """8443 = dashboard. Khong dung 443 (dim0/fairies va site trungthu)."""
