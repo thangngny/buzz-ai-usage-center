@@ -1,0 +1,8 @@
+# Cursor IDE Rules — Buzz Ecosystem Suite
+# Read AGENTS.md for full specification.
+
+- Run `python3 bin/agent-doctor.py --json` to diagnose.
+- Run `python3 bin/agent-doctor.py --install` to install.
+- Run `python3 bin/agent-doctor.py --verify` to verify.
+- Preserve non-invasive architecture and dynamic paths ($HOME / %USERPROFILE%).
+- Follow Conventional Commits: feat, fix, docs, chore, test.

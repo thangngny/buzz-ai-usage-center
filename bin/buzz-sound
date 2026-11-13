@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Buzz Notification & Sound CLI Manager
+=====================================
+"""
+
+import os
+import sys
+import json
+import subprocess
+import time
+
+CONFIG_DIR = os.path.expanduser("~/.config/buzz")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "sound-notifier.json")
+APP_DATA_DIR = os.path.expanduser("~/.local/share/xyz.block.buzz.app")
+SOUNDS_DIR = os.path.join(APP_DATA_DIR, "sounds")
+LOG_FILE = os.path.join(APP_DATA_DIR, "logs", "sound_notifier.log")
+LATEST_MSGS_FILE = os.path.join(APP_DATA_DIR, "latest_messages.json")
+
+AVAILABLE_SOUNDS = {
+    "elevenlabs": os.path.join(SOUNDS_DIR, "elevenlabs_thang.wav"),
+    "thang": os.path.join(SOUNDS_DIR, "thang_deptrai_chime.wav"),
+    "thang-cute": os.path.join(SOUNDS_DIR, "thang_deptrai_cute.wav"),
+    "tinh": os.path.join(SOUNDS_DIR, "tinh.wav"),
+    "mention": os.path.join(SOUNDS_DIR, "mention.wav"),
+    "pop": os.path.join(SOUNDS_DIR, "pop.wav"),
+    "system": "/usr/share/sounds/Yaru/stereo/message-new-instant.oga",
+    "yaru-msg": "/usr/share/sounds/Yaru/stereo/message.oga"
+}
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "enabled": True,
+        "sound_message": AVAILABLE_SOUNDS["elevenlabs"],
+        "sound_mention": AVAILABLE_SOUNDS["mention"],
+        "show_desktop_notification": True
+    }
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+def play_file(filepath):
+    if not os.path.exists(filepath):
+        print(f"File not found: {filepath}")
+        return False
+    env = os.environ.copy()
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+    try:
+        subprocess.run(["paplay", filepath], check=True, env=env)
+        return True
+    except Exception:
+        try:
+            subprocess.run(["pw-play", filepath], check=True, env=env)
+            return True
+        except Exception as e:
+            print(f"Error playing sound: {e}")
+            return False
+
+def cmd_test(args):
+    sound_name = args[0] if args else "elevenlabs"
+    path = AVAILABLE_SOUNDS.get(sound_name, sound_name)
+    print(f"🔊 Đang phát thử: {sound_name} ({path})")
+    play_file(path)
+    env = os.environ.copy()
+    env["DISPLAY"] = ":0"
+    subprocess.run([
+        "notify-send",
+        "-a", "Buzz",
+        "-i", "dialog-information",
+        "-u", "critical",
+        "-t", "8000",
+        "📢 [DuKick] #02. QUẢN TRỊ MEDIA",
+        "👤 Thắm: Anh Thắng ơi, có tin nhắn mới trong nhóm nè!"
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+
+def cmd_history():
+    if not os.path.exists(LATEST_MSGS_FILE):
+        print("Chưa có tin nhắn mới nào được ghi nhận kể từ khi bật service.")
+        return
+    try:
+        with open(LATEST_MSGS_FILE, "r", encoding="utf-8") as f:
+            msgs = json.load(f)
+        if not msgs:
+            print("Chưa có tin nhắn mới nào.")
+            return
+        print(f"\n=== 📬 LỊCH SỬ TIN NHẮN BUZZ MỚI NHẤT ({len(msgs)} tin) ===")
+        print(f"{'THỜI GIAN':<14} | {'NHÓM / WORKSPACE':<18} | {'KÊNH / CHANNEL':<22} | {'NGƯỜI GỬI':<16} | {'NỘI DUNG'}")
+        print("-" * 100)
+        for m in reversed(msgs[-20:]):
+            t = m.get("time", "")
+            comm = m.get("community", "Buzz")
+            ch = m.get("channel", "")
+            sender = m.get("sender", "")
+            cnt = m.get("content", "").replace("\n", " ")
+            if len(cnt) > 40:
+                cnt = cnt[:37] + "..."
+            print(f"{t:<14} | {comm:<18} | {ch:<22} | {sender:<16} | {cnt}")
+        print("-" * 100)
+    except Exception as e:
+        print(f"Lỗi đọc lịch sử: {e}")
+
+def cmd_status():
+    cfg = load_config()
+    print("=== Buzz Notification Status ===")
+    print(f"Trạng thái chuông: {'[BẬT]' if cfg.get('enabled', True) else '[TẮT]'}")
+    print(f"Âm thanh hiện tại: {cfg.get('sound_message')}")
+    print(f"Popup Banner màn hình: {'[BẬT]' if cfg.get('show_desktop_notification', True) else '[TẮT]'}")
+    res = subprocess.run(["systemctl", "--user", "is-active", "buzz-sound-notifier.service"], capture_output=True, text=True)
+    print(f"Trạng thái Service: {res.stdout.strip()}")
+    gnome_en = subprocess.run(["gsettings", "get", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "enable"], capture_output=True, text=True).stdout.strip()
+    print(f"GNOME Desktop Notifications: {'[BẬT]' if gnome_en == 'true' else '[TẮT]'}")
+    print(f"Web Live Feed: http://127.0.0.1:8787/messages (Xem trên trình duyệt)")
+
+def cmd_off():
+    cfg = load_config()
+    cfg["enabled"] = False
+    cfg["show_desktop_notification"] = False
+    save_config(cfg)
+    subprocess.run(["systemctl", "--user", "stop", "buzz-sound-notifier.service"])
+    subprocess.run(["systemctl", "--user", "restart", "buzz-usage-dashboard.service"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "enable", "false"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "show-banners", "false"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "enable-sound-alerts", "false"])
+    print("🔇 Đã TẮT toàn bộ thông báo và âm thanh tin nhắn của Buzz thành công!")
+
+def cmd_on():
+    cfg = load_config()
+    cfg["enabled"] = True
+    cfg["show_desktop_notification"] = True
+    save_config(cfg)
+    subprocess.run(["systemctl", "--user", "start", "buzz-sound-notifier.service"])
+    subprocess.run(["systemctl", "--user", "restart", "buzz-usage-dashboard.service"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "enable", "true"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "show-banners", "true"])
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/buzz/", "enable-sound-alerts", "true"])
+    print("🔔 Đã BẬT toàn bộ thông báo và âm thanh tin nhắn của Buzz thành công!")
+
+def cmd_import(args):
+    if not args:
+        print("Sử dụng: buzz-sound import <file_mp3/mp4>")
+        return
+    src = os.path.abspath(os.path.expanduser(args[0]))
+    if not os.path.exists(src):
+        print(f"Lỗi: Không tìm thấy file {src}")
+        return
+    dest = os.path.join(SOUNDS_DIR, "custom_user_sound.wav")
+    print(f"🔄 Đang chuẩn hóa âm thanh từ {src}...")
+    subprocess.run(["ffmpeg", "-y", "-i", src, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100", dest], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cfg = load_config()
+    cfg["sound_message"] = dest
+    save_config(cfg)
+    subprocess.run(["systemctl", "--user", "restart", "buzz-sound-notifier.service"])
+    print("✓ Đã cài đặt âm thanh tùy chỉnh mới thành công!")
+    play_file(dest)
+
+def main():
+    if len(sys.argv) < 2:
+        print("Buzz Sound & Notification Manager")
+        print("Cách dùng: buzz-sound <lệnh> [tham số]")
+        print("Các lệnh:")
+        print("  off / mute             Tắt toàn bộ âm thanh & thông báo khi có tin nhắn mới")
+        print("  on / unmute            Bật lại âm thanh & thông báo khi có tin nhắn mới")
+        print("  history                Xem danh sách tin nhắn mới nhận (Workspace, Kênh, Người gửi)")
+        print("  test [tên]             Phát thử chuông & hiện popup mẫu")
+        print("  status                 Xem cấu hình và trạng thái hiện tại")
+        print("  import <file>          Tải file ghi âm/video mới vào làm chuông")
+        print("  set-sound <tên>        Đổi âm thanh (elevenlabs, thang, tinh, pop)")
+        print("  restart                Khởi động lại service")
+        return
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    if cmd in ("off", "disable", "mute"):
+        cmd_off()
+    elif cmd in ("on", "enable", "unmute"):
+        cmd_on()
+    elif cmd == "history":
+        cmd_history()
+    elif cmd == "test":
+        cmd_test(args)
+    elif cmd == "status":
+        cmd_status()
+    elif cmd == "import":
+        cmd_import(args)
+    elif cmd == "set-sound":
+        name = args[0] if args else "elevenlabs"
+        path = AVAILABLE_SOUNDS.get(name, os.path.abspath(os.path.expanduser(name)))
+        cfg = load_config()
+        cfg["sound_message"] = path
+        cfg["sound_mention"] = path
+        save_config(cfg)
+        subprocess.run(["systemctl", "--user", "restart", "buzz-sound-notifier.service"])
+        subprocess.run(["systemctl", "--user", "restart", "buzz-usage-dashboard.service"])
+        print(f"✓ Đã đổi âm thanh sang: {name} ({path})")
+        play_file(path)
+    elif cmd == "restart":
+        subprocess.run(["systemctl", "--user", "restart", "buzz-sound-notifier.service"])
+        print("✓ Đã restart buzz-sound-notifier.service")
+    else:
+        print(f"Lệnh không hợp lệ: {cmd}")
+
+if __name__ == "__main__":
+    main()
