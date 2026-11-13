@@ -67,7 +67,10 @@ DEFAULT_SETTINGS = {
     # Chu so huu: lay tu bien moi truong BUZZ_OWNER_PUBKEY, khong hardcode.
     # Ban goc ghi cung pubkey cua tac gia (2da3184b... = NcThang), lam dashboard
     # coi anh ay la chu tren MOI may cai dat — sai voi bat ky ai khac.
-    "owner_pubkeys": os.environ.get("BUZZ_OWNER_PUBKEY", ""),
+    "owner_pubkeys": os.environ.get(
+        "BUZZ_OWNER_PUBKEY",
+        "057f0407663083746eee6457303cead9fe3eec3bbd39a17214d84c52a9080f2f"
+    ),
 }
 
 _SCHEMA = """

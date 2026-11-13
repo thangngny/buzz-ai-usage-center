@@ -66,6 +66,42 @@ def wsl_bash(script: str, timeout=180):
     return wsl_run(["bash", "-lc", script], timeout=timeout)
 
 
+def wsl_available() -> bool:
+    if in_wsl():
+        return True
+    if not in_windows():
+        return False
+    try:
+        r = subprocess.run(["wsl.exe", "-l", "-q"], capture_output=True, timeout=5)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def buzz_app_dir() -> str:
+    if in_windows():
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
+        p = os.path.join(appdata, "xyz.block.buzz.app")
+        if os.path.isdir(p):
+            return p
+        p_dev = os.path.join(appdata, "xyz.block.buzz.app.dev")
+        if os.path.isdir(p_dev):
+            return p_dev
+    return linux_app()
+
+
+def buzz_managed_agents_path() -> str:
+    return os.path.join(buzz_app_dir(), "agents", "managed-agents.json")
+
+
+def buzz_agent_logs_dir() -> str:
+    return os.path.join(buzz_app_dir(), "agents", "logs")
+
+
+def buzz_custom_harnesses_dir() -> str:
+    return os.path.join(buzz_app_dir(), "custom_harnesses")
+
+
 def windows_codex_homes() -> list:
     out = []
     drive = os.environ.get("SystemDrive", "C:")
@@ -85,6 +121,12 @@ def windows_codex_homes() -> list:
                 p = os.path.join(base, ent)
                 if os.path.isdir(p):
                     out.append(p)
+                    prof_dir = os.path.join(p, "profiles")
+                    if os.path.isdir(prof_dir):
+                        for sub in os.listdir(prof_dir):
+                            sp = os.path.join(prof_dir, sub)
+                            if os.path.isdir(sp):
+                                out.append(sp)
         except OSError:
             continue
     return sorted(set(out))
@@ -95,5 +137,8 @@ def linux_codex_home_list() -> list:
     if in_wsl():
         found = glob.glob("/home/*/.codex*") + glob.glob("/root/.codex*")
         return sorted(p for p in found if os.path.isdir(p))
+    if not wsl_available():
+        return []
     r = wsl_bash("ls -d /home/*/.codex* /root/.codex* 2>/dev/null")
     return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+

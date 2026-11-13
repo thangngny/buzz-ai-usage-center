@@ -31,7 +31,19 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
-BUZZ_CLI = os.environ.get("BUZZ_CLI", "/home/ncthang/.local/bin/buzz")
+import shutil
+
+def _resolve_buzz_cli() -> str:
+    if os.environ.get("BUZZ_CLI"):
+        return os.environ["BUZZ_CLI"]
+    which_buzz = shutil.which("buzz") or shutil.which("buzz.exe")
+    if which_buzz:
+        return which_buzz
+    if os.path.exists(r"D:\Buzz\buzz.exe"):
+        return r"D:\Buzz\buzz.exe"
+    return "/home/ncthang/.local/bin/buzz"
+
+BUZZ_CLI = _resolve_buzz_cli()
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _REPLY_TO_CTX = re.compile(r"--reply-to\s+([0-9a-fA-F]{64})")

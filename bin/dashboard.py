@@ -2202,6 +2202,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_bytes(self, code: int, data: bytes, ctype: str = "application/octet-stream", filename: str = ""):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", "inline")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _redirect(self, to: str):
         self.send_response(303)
         self.send_header("Location", to)
@@ -2213,7 +2223,41 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
         try:
-            if path == "/calibration":
+            if path.startswith("/deliverables/"):
+                fname = os.path.basename(urllib.parse.unquote(path[14:]))
+                search_dirs = [
+                    r"C:\Users\Admin\.buzz\OUTBOX",
+                    r"C:\Users\Admin\.buzz\videos",
+                    r"C:\Users\Admin\.buzz\PLANS"
+                ]
+                found_path = None
+                for sdir in search_dirs:
+                    p = os.path.join(sdir, fname)
+                    if os.path.exists(p) and os.path.isfile(p):
+                        found_path = p
+                        break
+                if found_path:
+                    ext = os.path.splitext(fname)[1].lower()
+                    mimes = {
+                        ".html": "text/html; charset=utf-8",
+                        ".mp4": "video/mp4",
+                        ".pdf": "application/pdf",
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".json": "application/json",
+                        ".md": "text/plain; charset=utf-8",
+                        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    }
+                    ctype = mimes.get(ext, "application/octet-stream")
+                    with open(found_path, "rb") as f:
+                        bdata = f.read()
+                    self._send_bytes(200, bdata, ctype, filename=fname)
+                else:
+                    self._send(404, "Deliverable not found", "text/plain")
+            elif path == "/calibration":
                 self._send(200, v_calibration(qs))
             elif path == "/":
                 self._send(200, v_overview())

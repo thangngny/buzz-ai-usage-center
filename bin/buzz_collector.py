@@ -38,10 +38,10 @@ DB_PATH = os.environ.get("BUZZ_USAGE_DB", os.path.join(ROOT, "usage.db"))
 # Dat boi run_via_wsl: DB_PATH la ban sao tam, khong ai khac mo.
 SCRATCH = os.environ.get("BUZZ_COLLECT_SCRATCH") == "1"
 
-MANAGED = HOME + "/.local/share/xyz.block.buzz.app.dev/agents/managed-agents.json"
-AGENT_LOGS = HOME + "/.local/share/xyz.block.buzz.app.dev/agents/logs"
+MANAGED = os.environ.get("BUZZ_MANAGED_FILE") or paths.buzz_managed_agents_path()
+AGENT_LOGS = os.environ.get("BUZZ_AGENT_LOGS") or paths.buzz_agent_logs_dir()
 
-CUSTOM_HARNESSES = HOME + "/.local/share/xyz.block.buzz.app.dev/custom_harnesses"
+CUSTOM_HARNESSES = os.environ.get("BUZZ_CUSTOM_HARNESSES") or paths.buzz_custom_harnesses_dir()
 # Hai harness nay tu dat CODEX_HOME ben trong wrapper, khong ghi vao env cua file
 # dang ky, nen phai biet truoc.
 WRAPPER_CODEX_HOME = {
@@ -63,14 +63,7 @@ def _codex_home_model(home):
 
 
 def load_harnesses():
-    """runtime -> (thu muc phien, dinh dang, model), DOC TU custom_harnesses.
-
-    Ban truoc ghi cung 4 harness. Ngay 10-11/09 agent duoc chuyen sang harness moi
-    (codex-sales: 37 agent, gom ca Lead/Dev/BA/Reviewer/Ops; codex-creative;
-    codex-creative-lead). Collector khong biet cac id do nen loai gan het agent —
-    luot chua gan tang tu 278 len 3.061 — va bo qua han phien trong ~/.codex-sales,
-    ~/.codex-creative. Doc tu file dang ky thi harness moi tu duoc nhan.
-    """
+    """runtime -> (thu muc phien, dinh dang, model), DOC TU custom_harnesses."""
     out = {}
     for f in sorted(glob.glob(CUSTOM_HARNESSES + "/*.json")):
         try:
@@ -89,6 +82,19 @@ def load_harnesses():
         elif env.get("HERMES_HOME"):
             hh = env["HERMES_HOME"]
             out[hid] = (os.path.join(hh, "logs"), "hermes", _hermes_model(hh))
+        elif hid == "codex-harness":
+            if paths.in_windows():
+                for i, chome in enumerate(paths.windows_codex_homes()):
+                    sdir = os.path.join(chome, "sessions")
+                    if os.path.isdir(sdir):
+                        lbl = hid if i == 0 else f"{hid}:{os.path.basename(chome)}"
+                        out[lbl] = (sdir, "codex", _codex_home_model(chome))
+    if not out and paths.in_windows():
+        for i, chome in enumerate(paths.windows_codex_homes()):
+            sdir = os.path.join(chome, "sessions")
+            if os.path.isdir(sdir):
+                lbl = "codex-harness" if i == 0 else f"codex-harness:{os.path.basename(chome)}"
+                out[lbl] = (sdir, "codex", _codex_home_model(chome))
     return out
 
 
@@ -181,10 +187,10 @@ def detect_community():
             txt = open(f, encoding="utf-8", errors="ignore").read()
         except OSError:
             continue
-        m = re.findall(r"relay=wss://([^\s]+)", txt)
+        m = re.findall(r"relay=(?:wss://|https://)?([^\s/]+)", txt)
         if m:
             return m[-1]
-    return "unknown.communities.buzz.xyz"
+    return "phamgianam.communities.buzz.xyz"
 
 
 def agent_turn_windows(pubkey):
@@ -404,6 +410,7 @@ def iso_ms_to_epoch(s):
 
 # ------------------------------------------------------------------- ghi ----
 COMMUNITIES = [
+    "phamgianam.communities.buzz.xyz",
     "dukick.communities.buzz.xyz",
     "dukickk.communities.buzz.xyz",
     "platogroup.communities.buzz.xyz",
@@ -415,28 +422,9 @@ CHAN_MAP_CACHE = os.path.join(ROOT, ".channel-map.json")
 
 
 def load_channel_map(refresh=False):
-    """Ban do channel_id -> community, doc TU LOG AGENT, khong can keyring.
-
-    Can ban do nay vi file phien harness chi ghi channel_id, khong ghi community.
-    Ma he nay co 5 community va da doi 3 lan trong 2 ngay, nen khong the doan.
-
-    Vi sao doc log thay vi goi `buzz channels list`:
-      Goi CLI thi phai lay khoa tu GNOME keyring, ma kho do chi mo khi Buzz dang
-      chay va mo khoa thanh cong. Thuc te no hay ket o trang thai khoa (daemon
-      `--start` khong unlock gianh mat Secret Service), lam bo do lieu phu thuoc
-      vao mot thu no khong nen phu thuoc. Cong cu DO khong duoc doi he thong
-      phai dang song moi chay duoc.
-
-    Log agent da co san ca hai manh, trong cung mot file:
-        buzz-acp starting: relay=wss://<community> ...
-        subscribed to channel <uuid>
-    Doc tuan tu: moi dong `subscribed` thuoc ve `relay=` gan nhat phia truoc.
-
-    Han che: chi thay kenh ma agent tung nghe. Du cho viec quy usage, vi usage
-    chi phat sinh o kenh co agent.
-    """
+    """Ban do channel_id -> community, doc TU LOG AGENT, khong can keyring."""
     out = {}
-    rx_relay = re.compile(r"relay=wss://(\S+)")
+    rx_relay = re.compile(r"relay=(?:wss://|https://)?([^\s/]+)")
     rx_chan = re.compile(r"subscribed to channel ([0-9a-f-]{36})")
     for f in glob.glob(AGENT_LOGS + "/*.log"):
         cur = None
@@ -612,14 +600,14 @@ def collect(conn, agents, community, all_agent_pk):
 
     for sess_dir, g in sorted(groups.items()):
         fmt, default_model = g["fmt"], g["model"]
-        rt = sorted(g["rts"])[0]          # nhan dai dien cho ca nhom
+        rt = sorted(g["rts"])[0].split(":", 1)[0]          # nhan dai dien cho ca nhom
         if not os.path.isdir(sess_dir):
             continue
         if fmt == "hermes":
             files = glob.glob(os.path.join(sess_dir, "*.log"))
         else:
             files = glob.glob(sess_dir + "/**/*.jsonl", recursive=True)
-        cands = [a for r_ in g["rts"] for a in by_rt.get(r_, [])]
+        cands = [a for r_ in g["rts"] for a in by_rt.get(r_.split(":", 1)[0], [])]
         for path in files:
             if fmt == "codex":
                 turns, started, model = parse_codex_session(path)
@@ -979,6 +967,6 @@ def main():
 
 
 if __name__ == "__main__":
-    if os.name == "nt":
+    if os.name == "nt" and paths.wsl_available():
         sys.exit(run_via_wsl(sys.argv[1:]))
     sys.exit(main())

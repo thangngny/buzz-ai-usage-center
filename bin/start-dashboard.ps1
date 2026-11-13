@@ -1,9 +1,8 @@
-# Start dashboard on 127.0.0.1:8787 if down, then attach Tailscale Funnel :8443.
+# Start dashboard on 127.0.0.1:8787 if down.
 # Idempotent: safe to run every 30s from watch-dashboard.ps1.
 $ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
-# python.exe (not pythonw): pythonw hid crashes and the start script thought 8787 was dead.
-$Py = "C:\Python314\python.exe"
+$Py = "C:\Users\Admin\marketing-ai-system\.venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { $Py = $cmd.Source }
@@ -14,15 +13,6 @@ function Test-Dash {
         $r = Invoke-WebRequest -Uri "http://127.0.0.1:8787/health" -UseBasicParsing -TimeoutSec 3
         return $r.StatusCode -eq 200
     } catch { return $false }
-}
-
-function PublicUrl {
-    try {
-        $j = tailscale status --json | ConvertFrom-Json
-        $dns = [string]$j.Self.DNSName
-        if ($dns) { return ("https://{0}:8443" -f $dns.TrimEnd(".")) }
-    } catch {}
-    return "https://trungthu.tailc0eb7b.ts.net:8443"
 }
 
 if (-not (Test-Dash)) {
@@ -38,7 +28,11 @@ if (-not (Test-Dash)) {
     }
 }
 
-& tailscale funnel --bg --https=8443 --yes 8787 | Out-Null
-$pub = PublicUrl
+# Check Cloudflare tunnel
+$cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+if (-not $cf) {
+    & $Py "$Root\bin\run_public_tunnel.py" | Out-Null
+}
+
 Write-Output "local  http://127.0.0.1:8787"
-Write-Output "public $pub"
+

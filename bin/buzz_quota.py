@@ -726,7 +726,7 @@ def fetch_linux_via_wsl():
 def collect_all():
     accounts = {}
     if paths.in_windows() and not LINUX_ONLY:
-        if not WIN_ONLY:
+        if not WIN_ONLY and paths.wsl_available():
             linux_accounts = fetch_linux_via_wsl()
             if linux_accounts is None:
                 raise RuntimeError("WSL quota scan failed; keeping last-known-good database snapshot")
@@ -830,6 +830,49 @@ def write_db(rows):
         conn.close()
     log("Da ghi %d dong cho %d tai khoan vao %s" % (
         len(rows), len({r["account_id"] for r in rows}), os.path.basename(DB_PATH)))
+    write_rotator_state(rows)
+
+
+def write_rotator_state(rows):
+    state_file = "C:/Users/Admin/.codex/profiles/.rotator-state.json"
+    now_s = int(time.time())
+    state = {"last_index": 0, "cooldowns": {}}
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+    except Exception:
+        pass
+    if "cooldowns" not in state or not isinstance(state["cooldowns"], dict):
+        state["cooldowns"] = {}
+
+    for r in rows:
+        if r.get("window_minutes") != 300:
+            continue
+        home = r.get("source_home", "")
+        profile_name = None
+        for p in ["lina.ho", "mkt", "acc3"]:
+            if p in home:
+                profile_name = p
+                break
+        if not profile_name:
+            continue
+
+        used = float(r.get("used_percent") or 0.0)
+        resets_at = int(r.get("resets_at") or 0)
+
+        if used >= 100.0 and resets_at > now_s:
+            state["cooldowns"][profile_name] = resets_at * 1000
+        elif resets_at <= now_s or used < 100.0:
+            if profile_name in state["cooldowns"]:
+                del state["cooldowns"][profile_name]
+
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        log("Da dong bo .rotator-state.json theo han muc that")
+    except Exception as e:
+        log("write_rotator_state that bai: %s" % e)
 
 
 def main():
