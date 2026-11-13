@@ -1817,25 +1817,20 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 # 2. Real verified facts: distinct entities verified
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
-                    WHERE event_type = 'lead.identity_verified'
+                    WHERE event_type IN ('lead.identity_verified', 'lead.legal_verified')
                       AND environment != 'mock'
                       AND synthetic = 0
                 """)
                 ev_verified = cur.fetchone()[0] or 0
 
-                # 3. Real deduped: distinct entities that actually cleared dedupe (V8-007: exclude CHECK_FAILED/error outcomes)
+                # 3. Real deduped: distinct entities that actually cleared dedupe (V9-005: strictly verified success)
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
                     WHERE event_type = 'lead.crm_dedupe_completed'
                       AND environment != 'mock'
                       AND synthetic = 0
-                      AND (
-                          json_extract(payload_json, '$.outcome') IN ('SUCCESS', 'CLEARED')
-                          OR (
-                              json_extract(payload_json, '$.dedupe_status') IN ('NOT_FOUND_VERIFIED', 'NOT_FOUND_IN_CHECKED_SCOPE', 'NOT_FOUND_IN_VERIFIED_SEARCH_SCOPE')
-                              AND COALESCE(json_extract(payload_json, '$.dedupe_status'), '') NOT IN ('CHECK_FAILED', 'STALE_RESULT')
-                          )
-                      )
+                      AND json_extract(payload_json, '$.outcome') IN ('SUCCESS', 'CLEARED')
+                      AND COALESCE(json_extract(payload_json, '$.outcome'), '') NOT IN ('FAILED', 'PARTIAL')
                 """)
                 ev_deduped = cur.fetchone()[0] or 0
 
@@ -1851,7 +1846,7 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 # 5. Real staged
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
-                    WHERE event_type = 'lead.crm_staged'
+                    WHERE event_type IN ('lead.crm_staged', 'lead.staged_for_crm')
                       AND environment != 'mock'
                       AND synthetic = 0
                 """)
@@ -1869,13 +1864,13 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
                 # 7. Real deals
                 cur.execute("""
                     SELECT count(DISTINCT entity_id) FROM business_events
-                    WHERE event_type IN ('deal.won', 'opportunity.created')
+                    WHERE event_type IN ('deal.created', 'deal.won', 'opportunity.created')
                       AND environment != 'mock'
                       AND synthetic = 0
                 """)
                 ev_deals = cur.fetchone()[0] or 0
 
-                if ev_raw > 0 or ev_verified > 0 or ev_deduped > 0 or ev_scored > 0 or ev_staged > 0 or ev_deals > 0:
+                if ev_raw > 0 or ev_verified > 0 or ev_deduped > 0 or ev_scored > 0 or ev_staged > 0 or ev_outreach > 0 or ev_deals > 0:
                     real_raw_discovered = ev_raw
                     real_verified_facts = ev_verified
                     real_deduped = ev_deduped
@@ -1967,19 +1962,21 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
 
     # If DEMO mode is explicitly requested, return the labeled demo dataset
     if is_demo_mode:
+        demo_stages = [
+            {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": 524, "pct": 100.0, "color": "var(--primary)"},
+            {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": 412, "pct": 78.6, "color": "var(--primary-hover)"},
+            {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": 384, "pct": 73.3, "color": "var(--warning)"},
+            {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": 286, "pct": 54.5, "color": "var(--capacity)"},
+            {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": 195, "pct": 37.2, "color": "var(--success)"},
+            {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": 149, "pct": 28.4, "color": "#06b6d4"},
+            {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": 43, "pct": 8.2, "color": "#10b981"},
+        ]
         return {
             "mode": "DEMO",
             "is_demo": True,
             "banner_warning": "⚠️ ĐANG HIỂN THỊ DỮ LIỆU MÔ PHỎNG (DEMO DATASET) — KHÔNG PHẢI SỐ LIỆU SẢN XUẤT THẬT",
-            "funnel_stages": [
-                {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": 524, "pct": 100.0, "color": "var(--primary)"},
-                {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": 412, "pct": 78.6, "color": "var(--primary-hover)"},
-                {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": 384, "pct": 73.3, "color": "var(--warning)"},
-                {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": 286, "pct": 54.5, "color": "var(--capacity)"},
-                {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": 195, "pct": 37.2, "color": "var(--success)"},
-                {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": 149, "pct": 28.4, "color": "#06b6d4"},
-                {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": 43, "pct": 8.2, "color": "#10b981"},
-            ],
+            "funnel": {s["id"]: s["count"] for s in demo_stages},
+            "funnel_stages": demo_stages,
             "kpis": {
                 "verified_leads": 412,
                 "icp_qualified": 286,
@@ -2015,20 +2012,23 @@ def get_gtm_funnel_data(mode: str = "auto") -> dict:
     scored = real_icp_scored if has_real_records else 0
     staged_cnt = real_crm_staged if has_real_records else 0
 
+    real_stages = [
+        {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": total_raw, "pct": 100.0 if total_raw > 0 else 0.0, "color": "var(--primary)"},
+        {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": verified, "pct": round(verified/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--primary-hover)"},
+        {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": deduped, "pct": round(deduped/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--warning)"},
+        {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": scored, "pct": round(scored/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--capacity)"},
+        {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": staged_cnt, "pct": round(staged_cnt/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--success)"},
+        {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": real_outreach_drafted, "pct": 0.0, "color": "#06b6d4"},
+        {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": real_replied_deals, "pct": 0.0, "color": "#10b981"},
+    ]
+
     return {
         "mode": "REAL",
         "is_demo": False,
         "status": data_status if data_status != "OK" else ("ACTIVE_LEDGER" if has_real_records else "NO_DATA"),
         "error_detail": error_detail,
-        "funnel_stages": [
-            {"id": "raw_discovered", "name": "1. Thu thập thô (Discovery)", "count": total_raw, "pct": 100.0 if total_raw > 0 else 0.0, "color": "var(--primary)"},
-            {"id": "verified_facts", "name": "2. Thẩm định pháp lý (VAT/MX)", "count": verified, "pct": round(verified/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--primary-hover)"},
-            {"id": "deduped", "name": "3. Khử trùng Zoho CRM", "count": deduped, "pct": round(deduped/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--warning)"},
-            {"id": "icp_scored", "name": "4. Chấm điểm 2 trục (Tier 1/2)", "count": scored, "pct": round(scored/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--capacity)"},
-            {"id": "crm_staged", "name": "5. Phê duyệt đưa vào CRM", "count": staged_cnt, "pct": round(staged_cnt/total_raw*100, 1) if total_raw > 0 else 0.0, "color": "var(--success)"},
-            {"id": "outreach_drafted", "name": "6. Bản nháp tiếp cận an toàn", "count": real_outreach_drafted, "pct": 0.0, "color": "#06b6d4"},
-            {"id": "replied_deals", "name": "7. Phản hồi tích cực / Deal mở", "count": real_replied_deals, "pct": 0.0, "color": "#10b981"},
-        ],
+        "funnel": {s["id"]: s["count"] for s in real_stages},
+        "funnel_stages": real_stages,
         "kpis": {
             "verified_leads": verified,
             "icp_qualified": scored,
